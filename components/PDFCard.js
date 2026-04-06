@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { formatFileSize, formatDate } from '../utils/pdfUtils';
 import { COLORS } from '../constants/theme';
 
@@ -7,13 +8,31 @@ import { COLORS } from '../constants/theme';
  * PDFCard Component
  * Individual PDF item in the FlatList
  */
-export const PDFCard = ({ item, onView, onRename, onDelete }) => {
+export const PDFCard = ({ item, onView, onRename, onDelete, isSelected, isSelectionMode, onToggleSelect }) => {
   return (
-    <View style={styles.card}>
+    <TouchableOpacity 
+      activeOpacity={0.8}
+      onPress={() => isSelectionMode ? onToggleSelect?.(item) : onView(item)}
+      onLongPress={() => onToggleSelect?.(item)}
+      style={[
+        styles.card, 
+        isSelected && styles.cardSelected 
+      ]}
+    >
       <View style={styles.info}>
-        <Text style={styles.name} numberOfLines={1}>
-          {item.name}
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {isSelectionMode && (
+             <MaterialCommunityIcons 
+               name={isSelected ? "checkbox-marked" : "checkbox-blank-outline"} 
+               size={20} 
+               color={isSelected ? COLORS.primary : COLORS.textMuted}
+               style={{ marginRight: 8, marginBottom: 6 }}
+             />
+          )}
+          <Text style={[styles.name, { flex: 1 }]} numberOfLines={1}>
+            {item.name}
+          </Text>
+        </View>
         <View style={styles.meta}>
           <Text style={styles.date}>{formatDate(item.createdAt)}</Text>
           <Text style={styles.size}>{formatFileSize(item.size)}</Text>
@@ -35,7 +54,7 @@ export const PDFCard = ({ item, onView, onRename, onDelete }) => {
           <Text style={styles.deleteBtnText}>Delete</Text>
         </TouchableOpacity>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 };
 
@@ -47,6 +66,11 @@ const styles = StyleSheet.create({
     padding: 14,
     borderLeftWidth: 3,
     borderLeftColor: COLORS.accent,
+  },
+  cardSelected: {
+    backgroundColor: '#1E2333',
+    borderColor: COLORS.primary,
+    borderWidth: 1,
   },
   info: {
     marginBottom: 12,

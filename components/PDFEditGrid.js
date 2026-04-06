@@ -43,6 +43,24 @@ export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, onCancel, onApply 
     setSelectedPages([]);
   }, [selectedPages]);
 
+  const handleSplit = useCallback(() => {
+    if (selectedPages.length === 0) return;
+    Alert.alert(
+      'Split PDF', 
+      `Extract these ${selectedPages.length} pages to a new PDF and remove them from here?`,
+      [
+        { text: 'Cancel' },
+        {
+          text: 'Split',
+          style: 'destructive',
+          onPress: () => {
+            onApply(pdfItem.uri, [{ action: 'SPLIT', pages: selectedPages }]);
+          }
+        }
+      ]
+    );
+  }, [selectedPages, pdfItem.uri, onApply]);
+
   const commitChanges = useCallback(() => {
     // Generate changesList array
     const changesList = [];
@@ -145,8 +163,11 @@ export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, onCancel, onApply 
           <TouchableOpacity style={styles.bottomBtn} onPress={handleRotate}>
             <Text style={styles.bottomBtnText}>🔄 Rotate</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.bottomBtn} onPress={handleSplit}>
+            <Text style={styles.bottomBtnText}>✂️ Split</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={[styles.bottomBtn, styles.deleteBtn]} onPress={handleDelete}>
-            <Text style={[styles.bottomBtnText, styles.deleteBtnText]}>🗑️ Toggle Delete</Text>
+            <Text style={[styles.bottomBtnText, styles.deleteBtnText]}>🗑️ Delete</Text>
           </TouchableOpacity>
         </View>
       )}

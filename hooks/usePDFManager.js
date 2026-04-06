@@ -20,6 +20,7 @@ export const usePDFManager = () => {
   const [activePdf, setActivePdf] = useState(null);
   const [viewerLoading, setViewerLoading] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
+  const [savedZIPs, setSavedZIPs] = useState([]);
 
   // Load all saved PDFs from documentDirectory
   const loadSavedPDFs = useCallback(async () => {
@@ -55,6 +56,51 @@ export const usePDFManager = () => {
       setSavedPDFs(validFiles);
     } catch (error) {
       console.error('Failed to load PDFs:', error);
+    }
+  }, []);
+
+  // Load all saved ZIPs from documentDirectory/zips
+  const loadSavedZIPs = useCallback(async () => {
+    try {
+      const zipsPath = FileSystem.documentDirectory + 'zips/';
+      const dirInfo = await FileSystem.getInfoAsync(zipsPath);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(zipsPath, { intermediates: true });
+        setSavedZIPs([]);
+        return;
+      }
+
+      const files = await FileSystem.readDirectoryAsync(zipsPath);
+      const zipFiles = files.filter((file) => file.endsWith('.zip'));
+
+      const enrichedFiles = await Promise.all(
+        zipFiles.map(async (fileName) => {
+          try {
+            const fileUri = zipsPath + fileName;
+            const fileInfo = await FileSystem.getInfoAsync(fileUri);
+            const match = fileName.match(/(\d{10,})/);
+            const timestamp = match ? Number(match[1]) : Date.now();
+
+            return {
+              id: fileName,
+              name: fileName,
+              size: fileInfo.size || 0,
+              createdAt: new Date(timestamp),
+              uri: fileUri,
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const validFiles = enrichedFiles
+        .filter((item) => item !== null)
+        .sort((a, b) => b.createdAt - a.createdAt);
+
+      setSavedZIPs(validFiles);
+    } catch (error) {
+      console.error('Failed to load ZIPs:', error);
     }
   }, []);
 
@@ -193,26 +239,74 @@ export const usePDFManager = () => {
     }
   }, [newFileName, renamingFile, loadSavedPDFs]);
 
-  // Delete PDF
-  const deletePDF = useCallback((pdfItem) => {
-    Alert.alert('Delete PDF', `Delete "${pdfItem.name}"?`, [
+  // Open ZIP (Share fallback)
+  const openZIP = useCallback(async (zipItem) => {
+    try {
+      const Sharing = require('expo-sharing');
+      await Sharing.shareAsync(zipItem.uri);
+    } catch (error) {
+      Alert.alert('Error', error.message || 'Failed to open ZIP');
+    }
+  }, []);
+
+  // Delete Item (PDF or ZIP)
+  const deleteItem = useCallback((item) => {
+    Alert.alert('Delete File', `Delete "${item.name}"?`, [
       { text: 'Cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
           try {
-            await FileSystem.deleteAsync(pdfItem.uri);
-            await loadSavedPDFs();
+            await FileSystem.deleteAsync(item.uri);
+            if (item.name.toLowerCase().endsWith('.zip')) {
+              await loadSavedZIPs();
+            } else {
+              await loadSavedPDFs();
+            }
           } catch (error) {
             Alert.alert('Error', `Failed to delete: ${error.message}`);
           }
         },
       },
     ]);
+  }, [loadSavedPDFs, loadSavedZIPs]);
+
+// Note: standalone Extract is removed, logic moved to modifyPdf
+
+  // Merge multiple PDFs into one
+  const mergePDFs = useCallback(async (selectedItems) => {
+    if (selectedItems.length < 2) return false;
+    setLoading(true);
+    try {
+      const mergedPdf = await PDFDocument.create();
+      
+      for (const item of selectedItems) {
+        const fileData = await FileSystem.readAsStringAsync(item.uri, { encoding: 'base64' });
+        const pdfDoc = await PDFDocument.load(fileData);
+        const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+        copiedPages.forEach((page) => mergedPdf.addPage(page));
+      }
+      
+      const pdfBytes = await mergedPdf.saveAsBase64();
+      const timestamp = Date.now();
+      const fileName = `Merged_Report_${timestamp}.pdf`;
+      const fileUri = FileSystem.documentDirectory + fileName;
+      
+      await FileSystem.writeAsStringAsync(fileUri, pdfBytes, { encoding: 'base64' });
+      
+      Alert.alert('Success', 'PDFs merged successfully!');
+      await loadSavedPDFs();
+      return true;
+    } catch (error) {
+      Alert.alert('Merge Error', error.message);
+      return false;
+    } finally {
+      setLoading(false);
+    }
   }, [loadSavedPDFs]);
 
-  // Modify PDF pages (batch rotate or delete)
+  // Modify PDF pages (batch rotate, delete, or SPLIT)
   const modifyPdf = useCallback(async (fileUri, changesList) => {
     try {
       if (!changesList || changesList.length === 0) return true;
@@ -220,6 +314,38 @@ export const usePDFManager = () => {
       const fileData = await FileSystem.readAsStringAsync(fileUri, { encoding: 'base64' });
       const pdfDoc = await PDFDocument.load(fileData);
       const pages = pdfDoc.getPages();
+
+      // Check for SPLIT action
+      const splitAction = changesList.find(c => c.action === 'SPLIT');
+      if (splitAction) {
+        setLoading(true);
+        const newPdf = await PDFDocument.create();
+        const pagesToExtract = [...splitAction.pages].sort((a,b) => a - b);
+        
+        // Copy selected pages
+        const copiedPages = await newPdf.copyPages(pdfDoc, pagesToExtract);
+        copiedPages.forEach(p => newPdf.addPage(p));
+        
+        // Save new split Document
+        const newPdfBytes = await newPdf.saveAsBase64();
+        const timestamp = Date.now();
+        const fileName = `Split_Document_${timestamp}.pdf`;
+        const newFileUri = FileSystem.documentDirectory + fileName;
+        await FileSystem.writeAsStringAsync(newFileUri, newPdfBytes, { encoding: 'base64' });
+
+        // Remove from current document in descending order
+        const sortedDesc = [...pagesToExtract].sort((a, b) => b - a);
+        sortedDesc.forEach(idx => pdfDoc.removePage(idx));
+
+        // Save modification changes on existing Document
+        const pdfBytes = await pdfDoc.saveAsBase64();
+        await FileSystem.writeAsStringAsync(fileUri, pdfBytes, { encoding: 'base64' });
+
+        setPdfVersion(v => v + 1);
+        await loadSavedPDFs();
+        Alert.alert('Success', 'PDF successfully split into two records.');
+        return true;
+      }
 
       const deleteActions = changesList.filter(c => c.action === 'DELETE');
       if (deleteActions.length >= pages.length) {
@@ -266,6 +392,7 @@ export const usePDFManager = () => {
     setSelectedImages,
     loading,
     savedPDFs,
+    savedZIPs,
     renameModal,
     setRenameModal,
     renamingFile,
@@ -276,14 +403,17 @@ export const usePDFManager = () => {
     viewerLoading,
     setViewerLoading,
     loadSavedPDFs,
+    loadSavedZIPs,
     pickImages,
     createPDF,
     openPDF,
+    openZIP,
     closePDFViewer,
     startRename,
     confirmRename,
-    deletePDF,
+    deleteItem,
     modifyPdf,
+    mergePDFs,
     pdfVersion,
   };
 };

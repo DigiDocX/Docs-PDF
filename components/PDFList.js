@@ -12,6 +12,9 @@ export const PDFList = ({
   onView,
   onRename,
   onDelete,
+  isSelectionMode,
+  selectedPDFs = [],
+  onToggleSelect,
 }) => {
   if (pdfItems.length === 0) {
     return (
@@ -33,6 +36,9 @@ export const PDFList = ({
           onView={onView}
           onRename={onRename}
           onDelete={onDelete}
+          isSelected={selectedPDFs.some(p => p.uri === item.uri)}
+          isSelectionMode={isSelectionMode}
+          onToggleSelect={onToggleSelect}
         />
       )}
       keyExtractor={(item) => item.id}

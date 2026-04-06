@@ -1,10 +1,16 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Alert, ActivityIndicator, StyleSheet } from 'react-native';
+import { Buffer } from 'buffer';
+global.Buffer = global.Buffer || Buffer;
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import { zip } from 'react-native-zip-archive';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NativePdf, isExpoGo } from '../utils/nativeModules';
 import { ensureFileUri } from '../utils/pdfUtils';
 import { fallbackOpenWithShare } from '../utils/fallback';
 import { COLORS } from '../constants/theme';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 /**
  * PDFViewer Component
@@ -14,6 +20,53 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
   const [activePageIndex, setActivePageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [viewerUri, setViewerUri] = useState(() => ensureFileUri(pdfItem?.uri));
+  const [isZipping, setIsZipping] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  const handlePrint = async () => {
+    try {
+      await Print.printAsync({ uri: viewerUri });
+    } catch (err) {
+      Alert.alert('Print Error', err.message);
+    }
+  };
+
+  const handleZip = async () => {
+    if (isZipping) return;
+    setIsZipping(true);
+    try {
+      const tempDir = `${FileSystem.cacheDirectory}zip_temp_${Date.now()}/`;
+      await FileSystem.makeDirectoryAsync(tempDir, { intermediates: true });
+
+      const fileName = pdfItem?.name || 'document.pdf';
+      const tempFilePath = `${tempDir}${fileName}`;
+      await FileSystem.copyAsync({
+        from: viewerUri,
+        to: tempFilePath
+      });
+
+      const zipName = fileName.replace(/\.pdf$/i, '') + '.zip';
+      const zipsDir = `${FileSystem.documentDirectory}zips/`;
+      const dirInfo = await FileSystem.getInfoAsync(zipsDir);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(zipsDir, { intermediates: true });
+      }
+      const targetZipPath = `${zipsDir}${zipName}`;
+
+      const fileInfo = await FileSystem.getInfoAsync(targetZipPath);
+      if (fileInfo.exists) {
+        await FileSystem.deleteAsync(targetZipPath);
+      }
+
+      await zip(tempDir, targetZipPath);
+      await Sharing.shareAsync(targetZipPath);
+      await FileSystem.deleteAsync(tempDir, { idempotent: true });
+    } catch (err) {
+      Alert.alert('Zip Error', err.message);
+    } finally {
+      setIsZipping(false);
+    }
+  };
 
   React.useEffect(() => {
     let isMounted = true;
@@ -70,15 +123,54 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           }}
         />
 
-        {/* Floating Toolbar */}
-        <View style={styles.floatingToolbar}>
+        {/* Floating Action Menu (FAB) */}
+        <View style={styles.fabContainer}>
+          {isMenuOpen && (
+            <View style={styles.menuItems}>
+              <TouchableOpacity
+                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                onPress={() => { setIsMenuOpen(false); handlePrint(); }}
+                disabled={isZipping}
+              >
+                <MaterialCommunityIcons name="printer" size={24} color="#fff" />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                onPress={() => { setIsMenuOpen(false); handleZip(); }}
+                disabled={isZipping}
+              >
+                {isZipping ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialCommunityIcons name="zip-box" size={24} color="#fff" />
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                onPress={() => { setIsMenuOpen(false); onEnterEditMode?.(pageCount); }}
+                disabled={isZipping}
+              >
+                <MaterialCommunityIcons name="file-document-edit-outline" size={24} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          )}
+
           <TouchableOpacity
-            style={styles.tbButton}
-            onPress={() => onEnterEditMode?.(pageCount)}
+            style={styles.fabBtn}
+            onPress={() => setIsMenuOpen(!isMenuOpen)}
           >
-            <Text style={styles.tbButtonText}>✏️ Edit Pages</Text>
+            <MaterialCommunityIcons name={isMenuOpen ? "close" : "dots-vertical"} size={28} color="#fff" />
           </TouchableOpacity>
         </View>
+
+        {isZipping && (
+          <View style={styles.loadingOverlay}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={styles.loadingText}>Creating ZIP Archive...</Text>
+          </View>
+        )}
       </View>
     );
   }
@@ -138,30 +230,53 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 14,
   },
-  floatingToolbar: {
+  fabContainer: {
     position: 'absolute',
-    bottom: 24,
-    left: '10%',
-    right: '10%',
-    flexDirection: 'row',
-    justifyContent: 'space-evenly',
+    bottom: 32,
+    right: 24,
     alignItems: 'center',
-    backgroundColor: 'rgba(20, 20, 30, 0.9)',
-    borderRadius: 16,
-    paddingVertical: 12,
+  },
+  menuItems: {
+    marginBottom: 16,
+    gap: 16,
+  },
+  menuItemBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(20, 20, 30, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
   },
-  tbButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+  fabBtn: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
   },
   tbButtonDisabled: {
     opacity: 0.5,
   },
-  tbButtonText: {
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  loadingText: {
     color: '#fff',
-    fontSize: 15,
+    marginTop: 12,
+    fontSize: 16,
     fontWeight: '600',
   },
   tbButtonTextDisabled: {
