@@ -1,0 +1,35 @@
+{
+  "typescript.validate.enable": false,
+  "typescript.enablePromptUseWorkspaceTsdk": false,
+  "typescript.workspaceSymbols.enabled": false,
+  "typescript.suggest.enabled": false,
+  "typescript.tsServer.experimental.enableProjectDiagnostics": false,
+  "@typescript-eslint/eslint-plugin": false,
+  "javascript.validate.enable": true,
+  "javascript.implicitProjectConfig.checkJs": false,
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[json]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "search.exclude": {
+    "node_modules": true,
+    ".git": true,
+    ".expo": true,
+    ".vscode": true
+  },
+  "files.exclude": {
+    "node_modules": true,
+    ".expo": true,
+    ".git": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.expo/**": true
+  },
+  "problems.exclude": {
+    "**/node_modules/**": true,
+    "**/.expo/**": true
+  }
+}

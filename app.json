@@ -1,29 +1,46 @@
 {
   "expo": {
-    "name": "MyPdfProject",
-    "slug": "MyPdfProject",
+    "name": "PDF Library",
+    "slug": "pdf-library",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "description": "Create and manage PDF files from images with native viewer support",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0a0a14"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.pdflibrary"
     },
     "android": {
+      "package": "com.example.pdflibrary",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0a0a14"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-file-system",
+        {
+          "photosPermission": "Allow PDF Library to access your photos for creating PDFs.",
+          "libraryPermission": "Allow PDF Library to access your library."
+        }
+      ]
+    ]
   }
 }
