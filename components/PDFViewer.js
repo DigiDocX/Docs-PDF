@@ -3,8 +3,8 @@ import { View, Text, TouchableOpacity, Alert, ActivityIndicator, StyleSheet } fr
 import { Buffer } from 'buffer';
 global.Buffer = global.Buffer || Buffer;
 import * as Print from 'expo-print';
-import * as Sharing from 'expo-sharing';
-import { zip } from 'react-native-zip-archive';
+
+import JSZip from 'jszip';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NativePdf, isExpoGo } from '../utils/nativeModules';
 import { ensureFileUri } from '../utils/pdfUtils';
@@ -16,7 +16,7 @@ import * as FileSystem from 'expo-file-system/legacy';
  * PDFViewer Component
  * Handles native PDF rendering with graceful fallback to sharing
  */
-export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, pdfVersion }) => {
+export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, pdfVersion, onZipSaved }) => {
   const [activePageIndex, setActivePageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [viewerUri, setViewerUri] = useState(() => ensureFileUri(pdfItem?.uri));
@@ -35,33 +35,53 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
     if (isZipping) return;
     setIsZipping(true);
     try {
-      const tempDir = `${FileSystem.cacheDirectory}zip_temp_${Date.now()}/`;
-      await FileSystem.makeDirectoryAsync(tempDir, { intermediates: true });
-
       const fileName = pdfItem?.name || 'document.pdf';
-      const tempFilePath = `${tempDir}${fileName}`;
-      await FileSystem.copyAsync({
-        from: viewerUri,
-        to: tempFilePath
-      });
+      const sourceUri = ensureFileUri(pdfItem?.uri || viewerUri);
 
-      const zipName = fileName.replace(/\.pdf$/i, '') + '.zip';
+      // Read the PDF as base64
+      let pdfBase64;
+      try {
+        pdfBase64 = await FileSystem.readAsStringAsync(sourceUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch {
+        // Some environments may resolve only plain paths.
+        pdfBase64 = await FileSystem.readAsStringAsync(sourceUri.replace('file://', ''), {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      // Build zip in memory using JSZip (pure JS — no native module needed)
+      const zip = new JSZip();
+      zip.file(fileName, pdfBase64, { base64: true });
+      const zipBase64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
+
+      // Ensure the zips directory exists
       const zipsDir = `${FileSystem.documentDirectory}zips/`;
       const dirInfo = await FileSystem.getInfoAsync(zipsDir);
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(zipsDir, { intermediates: true });
       }
+
+      // Save with timestamp to avoid name collisions
+      const baseName = fileName.replace(/\.pdf$/i, '');
+      const zipName = `${baseName}_${Date.now()}.zip`;
       const targetZipPath = `${zipsDir}${zipName}`;
 
-      const fileInfo = await FileSystem.getInfoAsync(targetZipPath);
-      if (fileInfo.exists) {
-        await FileSystem.deleteAsync(targetZipPath);
+      await FileSystem.writeAsStringAsync(targetZipPath, zipBase64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // Verify file was actually written
+      const written = await FileSystem.getInfoAsync(targetZipPath);
+      if (!written.exists || written.size === 0) {
+        throw new Error('Zip file was not saved correctly.');
       }
 
-      await zip(tempDir, targetZipPath);
-      await Sharing.shareAsync(targetZipPath);
-      await FileSystem.deleteAsync(tempDir, { idempotent: true });
+      Alert.alert('Success', `"${zipName}" saved to your Zipped Files.`);
+      await onZipSaved?.();
     } catch (err) {
+      console.error('Zip error:', err);
       Alert.alert('Zip Error', err.message);
     } finally {
       setIsZipping(false);

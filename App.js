@@ -104,6 +104,7 @@ export default function App() {
         onLoadComplete={() => setViewerLoading(false)}
         onClose={closePDFViewer}
         onModify={modifyPdf}
+        onZipSaved={loadSavedZIPs}
         pdfVersion={pdfVersion}
       />
 
@@ -151,7 +152,7 @@ export default function App() {
       {/* PDF or ZIP List Window */}
       <PDFList
         pdfItems={activeTab === 'pdfs' ? savedPDFs : savedZIPs}
-        onView={activeTab === 'pdfs' ? openPDF : openZIP}
+        onView={activeTab === 'pdfs' ? openPDF : async (item) => { await openZIP(item); setActiveTab('pdfs'); }}
         onRename={activeTab === 'pdfs' ? startRename : () => Alert.alert('Notice', 'Renaming disabled for zip files.')}
         onDelete={deleteItem}
         isSelectionMode={isSelectionMode}

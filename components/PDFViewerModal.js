@@ -16,6 +16,7 @@ export const PDFViewerModal = ({
   onLoadComplete,
   onClose,
   onModify,
+  onZipSaved,
   pdfVersion,
 }) => {
   const [isEditMode, setIsEditMode] = React.useState(false);
@@ -64,6 +65,7 @@ export const PDFViewerModal = ({
               setIsEditMode(true);
             }}
             pdfVersion={pdfVersion}
+            onZipSaved={onZipSaved}
           />
         )}
         

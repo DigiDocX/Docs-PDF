@@ -2,8 +2,10 @@ import { useState, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import * as Sharing from 'expo-sharing';
 import { PDFDocument, degrees } from 'pdf-lib';
 import { Buffer } from 'buffer';
+import JSZip from 'jszip';
 
 /**
  * Custom hook for PDF management (CRUD operations)
@@ -66,12 +68,26 @@ export const usePDFManager = () => {
       const dirInfo = await FileSystem.getInfoAsync(zipsPath);
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(zipsPath, { intermediates: true });
-        setSavedZIPs([]);
-        return;
       }
 
+      // Migrate older ZIP files that may exist in root documentDirectory.
+      const rootFiles = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+      const misplacedZipFiles = rootFiles.filter((file) => file.toLowerCase().endsWith('.zip'));
+      await Promise.all(
+        misplacedZipFiles.map(async (fileName) => {
+          const from = FileSystem.documentDirectory + fileName;
+          const to = zipsPath + fileName;
+          const targetInfo = await FileSystem.getInfoAsync(to);
+          if (!targetInfo.exists) {
+            await FileSystem.moveAsync({ from, to });
+          } else {
+            await FileSystem.deleteAsync(from, { idempotent: true });
+          }
+        })
+      );
+
       const files = await FileSystem.readDirectoryAsync(zipsPath);
-      const zipFiles = files.filter((file) => file.endsWith('.zip'));
+      const zipFiles = files.filter((file) => file.toLowerCase().endsWith('.zip'));
 
       const enrichedFiles = await Promise.all(
         zipFiles.map(async (fileName) => {
@@ -79,7 +95,10 @@ export const usePDFManager = () => {
             const fileUri = zipsPath + fileName;
             const fileInfo = await FileSystem.getInfoAsync(fileUri);
             const match = fileName.match(/(\d{10,})/);
-            const timestamp = match ? Number(match[1]) : Date.now();
+            const fallbackTimestamp = fileInfo.modificationTime
+              ? Number(fileInfo.modificationTime) * 1000
+              : Date.now();
+            const timestamp = match ? Number(match[1]) : fallbackTimestamp;
 
             return {
               id: fileName,
@@ -239,15 +258,102 @@ export const usePDFManager = () => {
     }
   }, [newFileName, renamingFile, loadSavedPDFs]);
 
-  // Open ZIP (Share fallback)
+  // Extract ZIP using JSZip (pure JS – works in Expo Go)
   const openZIP = useCallback(async (zipItem) => {
     try {
-      const Sharing = require('expo-sharing');
-      await Sharing.shareAsync(zipItem.uri);
+      setLoading(true);
+
+      // Read the zip file as base64
+      const zipBase64 = await FileSystem.readAsStringAsync(zipItem.uri, {
+        encoding: 'base64',
+      });
+
+      // Parse the zip with JSZip
+      const zip = await JSZip.loadAsync(zipBase64, { base64: true });
+
+      let extractedCount = 0;
+
+      // Iterate over every file inside the zip
+      const fileNames = Object.keys(zip.files);
+      for (const fileName of fileNames) {
+        const entry = zip.files[fileName];
+
+        // Skip directories and macOS resource-fork junk files
+        if (entry.dir || fileName.startsWith('__MACOSX')) continue;
+
+        const lowerName = fileName.toLowerCase();
+        const baseName = fileName.split('/').pop(); // strip folder path
+
+        if (lowerName.endsWith('.pdf')) {
+          // ---- PDF file: save directly ----
+          const pdfBase64 = await entry.async('base64');
+          const timestamp = Date.now();
+          const destUri =
+            FileSystem.documentDirectory + `Unzipped_${timestamp}_${baseName}`;
+          await FileSystem.writeAsStringAsync(destUri, pdfBase64, {
+            encoding: 'base64',
+          });
+          extractedCount++;
+        } else if (
+          lowerName.endsWith('.jpg') ||
+          lowerName.endsWith('.jpeg') ||
+          lowerName.endsWith('.png')
+        ) {
+          // ---- Image file: wrap in a single-page PDF ----
+          const imgBase64 = await entry.async('base64');
+          const imgBytes = Buffer.from(imgBase64, 'base64');
+
+          const pdfDoc = await PDFDocument.create();
+          let embeddedImage;
+          if (lowerName.endsWith('.png')) {
+            embeddedImage = await pdfDoc.embedPng(imgBytes);
+          } else {
+            embeddedImage = await pdfDoc.embedJpg(imgBytes);
+          }
+
+          const page = pdfDoc.addPage([
+            embeddedImage.width,
+            embeddedImage.height,
+          ]);
+          page.drawImage(embeddedImage, {
+            x: 0,
+            y: 0,
+            width: embeddedImage.width,
+            height: embeddedImage.height,
+          });
+
+          const pdfBase64 = await pdfDoc.saveAsBase64();
+          const timestamp = Date.now();
+          const pdfName = baseName.replace(/\.[^.]+$/, '.pdf');
+          const destUri =
+            FileSystem.documentDirectory + `Unzipped_${timestamp}_${pdfName}`;
+          await FileSystem.writeAsStringAsync(destUri, pdfBase64, {
+            encoding: 'base64',
+          });
+          extractedCount++;
+        }
+        // other file types are silently skipped
+      }
+
+      if (extractedCount > 0) {
+        Alert.alert(
+          'Success',
+          `Extracted ${extractedCount} file(s) into your PDF library.`
+        );
+      } else {
+        Alert.alert(
+          'Notice',
+          'No PDF or image files were found inside the ZIP.'
+        );
+      }
+
+      await loadSavedPDFs();
     } catch (error) {
-      Alert.alert('Error', error.message || 'Failed to open ZIP');
+      Alert.alert('Error', error.message || 'Failed to extract ZIP');
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }, [loadSavedPDFs]);
 
   // Delete Item (PDF or ZIP)
   const deleteItem = useCallback((item) => {
@@ -314,6 +420,66 @@ export const usePDFManager = () => {
       const fileData = await FileSystem.readAsStringAsync(fileUri, { encoding: 'base64' });
       const pdfDoc = await PDFDocument.load(fileData);
       const pages = pdfDoc.getPages();
+
+      // Check for REARRANGE action (tap-to-sequence flow)
+      const rearrangeAction = changesList.find((c) => c.action === 'REARRANGE');
+      if (rearrangeAction) {
+        const orderedPages = Array.isArray(rearrangeAction.pages)
+          ? rearrangeAction.pages.filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < pages.length)
+          : [];
+
+        if (orderedPages.length === 0) {
+          Alert.alert('Error', 'Please select at least one page for rearrangement.');
+          return false;
+        }
+
+        const reorderedPdf = await PDFDocument.create();
+        const copiedPages = await reorderedPdf.copyPages(pdfDoc, orderedPages);
+        copiedPages.forEach((page) => reorderedPdf.addPage(page));
+
+        const outputBase64 = await reorderedPdf.saveAsBase64();
+        const timestamp = Date.now();
+        const fileName = `Rearranged_${timestamp}.pdf`;
+        const outputUri = FileSystem.documentDirectory + fileName;
+        await FileSystem.writeAsStringAsync(outputUri, outputBase64, { encoding: 'base64' });
+
+        const createdItem = {
+          id: fileName,
+          name: fileName,
+          uri: outputUri,
+          createdAt: new Date(timestamp),
+        };
+
+        await loadSavedPDFs();
+
+        Alert.alert('Success', 'Rearranged PDF generated.', [
+          {
+            text: 'View',
+            onPress: () => {
+              setViewerLoading(false);
+              setActivePdf(createdItem);
+              setViewerModalVisible(true);
+            },
+          },
+          {
+            text: 'Share',
+            onPress: async () => {
+              try {
+                if (!(await Sharing.isAvailableAsync())) {
+                  Alert.alert('Share Unavailable', 'Sharing is not available on this device.');
+                  return;
+                }
+                await Sharing.shareAsync(outputUri);
+              } catch (error) {
+                Alert.alert('Share Error', error.message || 'Failed to share the generated PDF.');
+              }
+            },
+          },
+          { text: 'Done', style: 'cancel' },
+        ]);
+
+        return true;
+      }
 
       // Check for SPLIT action
       const splitAction = changesList.find(c => c.action === 'SPLIT');
