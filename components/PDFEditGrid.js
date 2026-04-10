@@ -5,8 +5,8 @@ import ExpoPdfToImageModule from 'expo-pdf-to-image';
 import { ensureFileUri } from '../utils/pdfUtils';
 import { COLORS } from '../constants/theme';
 
-export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, onCancel, onApply }) => {
-  const [mode, setMode] = useState('batch');
+export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, initialMode = 'batch', onCancel, onApply }) => {
+  const [mode, setMode] = useState(initialMode);
   const [selectedPages, setSelectedPages] = useState([]);
   const [changes, setChanges] = useState({});
   const [selectedOrder, setSelectedOrder] = useState([]);
@@ -41,7 +41,7 @@ export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, onCancel, onApply 
       }
     };
 
-    setMode('batch');
+    setMode(initialMode);
     setSelectedPages([]);
     setChanges({});
     setSelectedOrder([]);
@@ -50,7 +50,7 @@ export const PDFEditGrid = ({ pdfItem, pdfVersion, pageCount, onCancel, onApply 
     return () => {
       isMounted = false;
     };
-  }, [pdfItem?.uri, pdfVersion, pageCount]);
+  }, [pdfItem?.uri, pdfVersion, pageCount, initialMode]);
 
   const toggleBatchSelection = useCallback((index) => {
     setSelectedPages((prev) =>

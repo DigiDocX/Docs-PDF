@@ -1,4 +1,5 @@
 import { registerRootComponent } from 'expo';
+import './utils/cryptoPolyfill';
 
 import App from './App';
 

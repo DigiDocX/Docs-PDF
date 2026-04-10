@@ -15,14 +15,15 @@ export const PDFList = ({
   isSelectionMode,
   selectedPDFs = [],
   onToggleSelect,
+  showActions = true,
+  emptyTitle = 'No PDFs Yet',
+  emptySubtitle = 'Select images and create your first PDF',
 }) => {
   if (pdfItems.length === 0) {
     return (
       <View style={STYLES.emptyState}>
-        <Text style={STYLES.emptyTitle}>No PDFs Yet</Text>
-        <Text style={STYLES.emptySubtitle}>
-          Select images and create your first PDF
-        </Text>
+        <Text style={STYLES.emptyTitle}>{emptyTitle}</Text>
+        <Text style={STYLES.emptySubtitle}>{emptySubtitle}</Text>
       </View>
     );
   }
@@ -39,6 +40,7 @@ export const PDFList = ({
           isSelected={selectedPDFs.some(p => p.uri === item.uri)}
           isSelectionMode={isSelectionMode}
           onToggleSelect={onToggleSelect}
+          showActions={showActions}
         />
       )}
       keyExtractor={(item) => item.id}

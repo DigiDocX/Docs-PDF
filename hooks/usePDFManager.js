@@ -4,6 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import * as Sharing from 'expo-sharing';
 import { PDFDocument, degrees } from 'pdf-lib';
+import { PDFDocument as SecurePDFDocument } from 'pdf-lib-plus-encrypt';
 import { Buffer } from 'buffer';
 import JSZip from 'jszip';
 
@@ -412,6 +413,111 @@ export const usePDFManager = () => {
     }
   }, [loadSavedPDFs]);
 
+  // Lock PDF with password and save new encrypted copy locally
+  const lockPDF = useCallback(async (pdfItem, userPassword) => {
+    if (!pdfItem?.uri) {
+      Alert.alert('Error', 'Invalid PDF file.');
+      return false;
+    }
+
+    if (!userPassword || userPassword.length < 6) {
+      Alert.alert('Error', 'Password must be at least 6 characters.');
+      return false;
+    }
+
+    setLoading(true);
+    try {
+      const randomApi = globalThis?.crypto?.getRandomValues || global?.crypto?.getRandomValues;
+      if (typeof randomApi !== 'function') {
+        throw new Error('Secure random API unavailable (crypto.getRandomValues is missing). Rebuild the app after dependency changes.');
+      }
+
+      // Preflight secure randomness because encryption key generation depends on it.
+      const randomProbe = new Uint8Array(16);
+      randomApi(randomProbe);
+
+      const sourceUri = pdfItem.uri.startsWith('file://') ? pdfItem.uri : `file://${pdfItem.uri}`;
+
+      let sourceBase64;
+      try {
+        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch {
+        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri.replace('file://', ''), {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      const sourceBytes = Uint8Array.from(Buffer.from(sourceBase64, 'base64'));
+      const securePdf = await SecurePDFDocument.load(sourceBytes, { ignoreEncryption: true });
+
+      await securePdf.encrypt({
+        userPassword,
+        ownerPassword: userPassword,
+        pdfVersion: '1.7ext3',
+        permissions: {
+          printing: 'highResolution',
+          modifying: false,
+          copying: false,
+          annotating: false,
+          fillingForms: false,
+          contentAccessibility: true,
+          documentAssembly: false,
+        },
+      });
+
+      const encryptedBytes = await securePdf.save();
+      const encryptedBase64 = Buffer.from(encryptedBytes).toString('base64');
+
+      const originalName = pdfItem.name || 'document.pdf';
+      const baseName = originalName.replace(/\.pdf$/i, '');
+      let targetName = `${baseName}_locked.pdf`;
+      let targetUri = FileSystem.documentDirectory + targetName;
+
+      const existing = await FileSystem.getInfoAsync(targetUri);
+      if (existing.exists) {
+        targetName = `${baseName}_locked_${Date.now()}.pdf`;
+        targetUri = FileSystem.documentDirectory + targetName;
+      }
+
+      await FileSystem.writeAsStringAsync(targetUri, encryptedBase64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      await loadSavedPDFs();
+
+      if (await Sharing.isAvailableAsync()) {
+        Alert.alert('Success', `Locked PDF created: ${targetName}`, [
+          {
+            text: 'Share',
+            onPress: async () => {
+              try {
+                await Sharing.shareAsync(targetUri);
+              } catch (error) {
+                Alert.alert('Share Error', error.message || 'Failed to share locked PDF.');
+              }
+            },
+          },
+          { text: 'Done', style: 'cancel' },
+        ]);
+      } else {
+        Alert.alert('Success', `Locked PDF created: ${targetName}`);
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Lock PDF error:', error);
+      Alert.alert(
+        'Lock Error',
+        error.message || 'Failed to lock PDF. Ensure a development build is installed and app restarted after native dependency changes.'
+      );
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, [loadSavedPDFs]);
+
   // Modify PDF pages (batch rotate, delete, or SPLIT)
   const modifyPdf = useCallback(async (fileUri, changesList) => {
     try {
@@ -580,6 +686,7 @@ export const usePDFManager = () => {
     deleteItem,
     modifyPdf,
     mergePDFs,
+    lockPDF,
     pdfVersion,
   };
 };

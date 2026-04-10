@@ -17,10 +17,21 @@ export const PDFViewerModal = ({
   onClose,
   onModify,
   onZipSaved,
+  onLockPDF,
   pdfVersion,
+  requestedAction,
 }) => {
   const [isEditMode, setIsEditMode] = React.useState(false);
   const [viewerPageCount, setViewerPageCount] = React.useState(1);
+  const autoEditActions = ['split', 'rearrange', 'edit'];
+  const shouldAutoEnterEdit = autoEditActions.includes(requestedAction);
+
+  React.useEffect(() => {
+    if (visible) {
+      setIsEditMode(false);
+      setViewerPageCount(1);
+    }
+  }, [visible, pdfItem?.uri, requestedAction]);
 
   const handleClose = () => {
     setIsEditMode(false);
@@ -58,7 +69,13 @@ export const PDFViewerModal = ({
         {pdfItem && !isEditMode && (
           <PDFViewer
             pdfItem={pdfItem}
-            onLoadComplete={onLoadComplete}
+            onLoadComplete={(count) => {
+              setViewerPageCount(count || 1);
+              onLoadComplete?.();
+              if (shouldAutoEnterEdit) {
+                setIsEditMode(true);
+              }
+            }}
             onClose={handleClose}
             onEnterEditMode={(count) => {
               setViewerPageCount(count);
@@ -66,6 +83,7 @@ export const PDFViewerModal = ({
             }}
             pdfVersion={pdfVersion}
             onZipSaved={onZipSaved}
+            onLockPDF={onLockPDF}
           />
         )}
         
@@ -74,6 +92,7 @@ export const PDFViewerModal = ({
             pdfItem={pdfItem}
             pdfVersion={pdfVersion}
             pageCount={viewerPageCount}
+            initialMode={requestedAction === 'rearrange' ? 'rearrange' : 'batch'}
             onCancel={() => setIsEditMode(false)}
             onApply={handleApplyEdits}
           />

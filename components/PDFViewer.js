@@ -9,6 +9,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NativePdf, isExpoGo } from '../utils/nativeModules';
 import { ensureFileUri } from '../utils/pdfUtils';
 import { fallbackOpenWithShare } from '../utils/fallback';
+import { LockPDFModal } from './LockPDFModal';
 import { COLORS } from '../constants/theme';
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -16,11 +17,13 @@ import * as FileSystem from 'expo-file-system/legacy';
  * PDFViewer Component
  * Handles native PDF rendering with graceful fallback to sharing
  */
-export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, pdfVersion, onZipSaved }) => {
+export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, pdfVersion, onZipSaved, onLockPDF }) => {
   const [activePageIndex, setActivePageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [viewerUri, setViewerUri] = useState(() => ensureFileUri(pdfItem?.uri));
   const [isZipping, setIsZipping] = useState(false);
+  const [isLocking, setIsLocking] = useState(false);
+  const [showLockModal, setShowLockModal] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const handlePrint = async () => {
@@ -28,6 +31,19 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
       await Print.printAsync({ uri: viewerUri });
     } catch (err) {
       Alert.alert('Print Error', err.message);
+    }
+  };
+
+  const handleLockPdf = async (password) => {
+    if (!onLockPDF || isLocking) return;
+    setIsLocking(true);
+    try {
+      const success = await onLockPDF(pdfItem, password);
+      if (success) {
+        setShowLockModal(false);
+      }
+    } finally {
+      setIsLocking(false);
     }
   };
 
@@ -126,7 +142,7 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           style={{ flex: 1 }}
           onLoadComplete={(numberOfPages) => {
             setPageCount(numberOfPages);
-            onLoadComplete?.();
+            onLoadComplete?.(numberOfPages);
           }}
           onPageChanged={(page, numberOfPages) => {
             setActivePageIndex(page - 1); // Native library returns 1-based index
@@ -145,20 +161,30 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
 
         {/* Floating Action Menu (FAB) */}
         <View style={styles.fabContainer}>
+          <LockPDFModal
+            visible={showLockModal}
+            fileName={pdfItem?.name}
+            onCancel={() => {
+              if (!isLocking) setShowLockModal(false);
+            }}
+            onConfirm={handleLockPdf}
+            isLoading={isLocking}
+          />
+
           {isMenuOpen && (
             <View style={styles.menuItems}>
               <TouchableOpacity
-                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); handlePrint(); }}
-                disabled={isZipping}
+                disabled={isZipping || isLocking}
               >
                 <MaterialCommunityIcons name="printer" size={24} color="#fff" />
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); handleZip(); }}
-                disabled={isZipping}
+                disabled={isZipping || isLocking}
               >
                 {isZipping ? (
                   <ActivityIndicator size="small" color="#fff" />
@@ -168,9 +194,24 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.menuItemBtn, isZipping && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
+                onPress={() => {
+                  setIsMenuOpen(false);
+                  setShowLockModal(true);
+                }}
+                disabled={isZipping || isLocking}
+              >
+                {isLocking ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialCommunityIcons name="lock" size={24} color="#fff" />
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); onEnterEditMode?.(pageCount); }}
-                disabled={isZipping}
+                disabled={isZipping || isLocking}
               >
                 <MaterialCommunityIcons name="file-document-edit-outline" size={24} color="#fff" />
               </TouchableOpacity>
@@ -185,10 +226,10 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           </TouchableOpacity>
         </View>
 
-        {isZipping && (
+        {(isZipping || isLocking) && (
           <View style={styles.loadingOverlay}>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Creating ZIP Archive...</Text>
+            <Text style={styles.loadingText}>{isLocking ? 'Encrypting PDF...' : 'Creating ZIP Archive...'}</Text>
           </View>
         )}
       </View>

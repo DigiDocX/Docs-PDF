@@ -8,7 +8,7 @@ import { COLORS } from '../constants/theme';
  * PDFCard Component
  * Individual PDF item in the FlatList
  */
-export const PDFCard = ({ item, onView, onRename, onDelete, isSelected, isSelectionMode, onToggleSelect }) => {
+export const PDFCard = ({ item, onView, onRename, onDelete, isSelected, isSelectionMode, onToggleSelect, showActions = true }) => {
   return (
     <TouchableOpacity 
       activeOpacity={0.8}
@@ -39,21 +39,21 @@ export const PDFCard = ({ item, onView, onRename, onDelete, isSelected, isSelect
         </View>
       </View>
 
-      <View style={styles.actionButtons}>
-        <TouchableOpacity style={[styles.btn, styles.viewBtn]} onPress={() => onView(item)}>
-          <Text style={styles.btnText}>View</Text>
-        </TouchableOpacity>
+      {showActions && (
+        <View style={styles.actionButtons}>
+          <TouchableOpacity style={[styles.btn, styles.viewBtn]} onPress={() => onView(item)}>
+            <Text style={styles.btnText}>View</Text>
+          </TouchableOpacity>
 
+          <TouchableOpacity style={[styles.btn, styles.renameBtn]} onPress={() => onRename(item)}>
+            <Text style={styles.btnText}>Rename</Text>
+          </TouchableOpacity>
 
-
-        <TouchableOpacity style={[styles.btn, styles.renameBtn]} onPress={() => onRename(item)}>
-          <Text style={styles.btnText}>Rename</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={[styles.btn, styles.deleteBtn]} onPress={() => onDelete(item)}>
-          <Text style={styles.deleteBtnText}>Delete</Text>
-        </TouchableOpacity>
-      </View>
+          <TouchableOpacity style={[styles.btn, styles.deleteBtn]} onPress={() => onDelete(item)}>
+            <Text style={styles.deleteBtnText}>Delete</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </TouchableOpacity>
   );
 };
