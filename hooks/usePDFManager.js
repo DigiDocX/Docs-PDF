@@ -470,16 +470,8 @@ export const usePDFManager = () => {
       const encryptedBytes = await securePdf.save();
       const encryptedBase64 = Buffer.from(encryptedBytes).toString('base64');
 
-      const originalName = pdfItem.name || 'document.pdf';
-      const baseName = originalName.replace(/\.pdf$/i, '');
-      let targetName = `${baseName}_locked.pdf`;
-      let targetUri = FileSystem.documentDirectory + targetName;
-
-      const existing = await FileSystem.getInfoAsync(targetUri);
-      if (existing.exists) {
-        targetName = `${baseName}_locked_${Date.now()}.pdf`;
-        targetUri = FileSystem.documentDirectory + targetName;
-      }
+      // Encrypt in-place: overwrite the original file with encrypted version
+      const targetUri = pdfItem.uri.startsWith('file://') ? pdfItem.uri : `file://${pdfItem.uri}`;
 
       await FileSystem.writeAsStringAsync(targetUri, encryptedBase64, {
         encoding: FileSystem.EncodingType.Base64,
@@ -487,23 +479,10 @@ export const usePDFManager = () => {
 
       await loadSavedPDFs();
 
-      if (await Sharing.isAvailableAsync()) {
-        Alert.alert('Success', `Locked PDF created: ${targetName}`, [
-          {
-            text: 'Share',
-            onPress: async () => {
-              try {
-                await Sharing.shareAsync(targetUri);
-              } catch (error) {
-                Alert.alert('Share Error', error.message || 'Failed to share locked PDF.');
-              }
-            },
-          },
-          { text: 'Done', style: 'cancel' },
-        ]);
-      } else {
-        Alert.alert('Success', `Locked PDF created: ${targetName}`);
-      }
+      const originalName = pdfItem.name || 'document.pdf';
+      Alert.alert('Success', `"${originalName}" is now password-protected and encrypted.`, [
+        { text: 'Done', style: 'default' },
+      ]);
 
       return true;
     } catch (error) {

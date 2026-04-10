@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Alert, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Alert, ActivityIndicator, StyleSheet, Modal, TextInput } from 'react-native';
 import { Buffer } from 'buffer';
 global.Buffer = global.Buffer || Buffer;
 import * as Print from 'expo-print';
@@ -21,10 +21,40 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
   const [activePageIndex, setActivePageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [viewerUri, setViewerUri] = useState(() => ensureFileUri(pdfItem?.uri));
+  const [viewerPassword, setViewerPassword] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+  const [passwordPromptMessage, setPasswordPromptMessage] = useState('This PDF is password-protected. Enter password to continue.');
   const [isZipping, setIsZipping] = useState(false);
   const [isLocking, setIsLocking] = useState(false);
   const [showLockModal, setShowLockModal] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  const isPasswordError = (error) => {
+    const message = (error?.message || error || '').toString();
+    return /(password|encrypted|decrypt|authorization|security)/i.test(message);
+  };
+
+  const openPasswordPrompt = (message) => {
+    setPasswordPromptMessage(message || 'This PDF is password-protected. Enter password to continue.');
+    setPasswordInput('');
+    setShowPasswordPrompt(true);
+  };
+
+  const closePasswordPrompt = () => {
+    setShowPasswordPrompt(false);
+    setPasswordInput('');
+  };
+
+  const submitPassword = () => {
+    if (!passwordInput.trim()) {
+      Alert.alert('Password Required', 'Please enter the PDF password.');
+      return;
+    }
+    setViewerPassword(passwordInput);
+    setShowPasswordPrompt(false);
+    setPasswordInput('');
+  };
 
   const handlePrint = async () => {
     try {
@@ -124,6 +154,13 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
     processUri();
     return () => { isMounted = false; };
   }, [pdfItem, pdfVersion]);
+
+  React.useEffect(() => {
+    setViewerPassword('');
+    setPasswordInput('');
+    setShowPasswordPrompt(false);
+  }, [pdfItem?.uri]);
+
   if (!pdfItem?.uri) {
     return (
       <View style={styles.errorContainer}>
@@ -138,6 +175,7 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
       <View style={{ flex: 1 }}>
         <NativePdf
           source={{ uri: viewerUri, cache: true }}
+          password={viewerPassword || undefined}
           trustAllCerts={false}
           style={{ flex: 1 }}
           onLoadComplete={(numberOfPages) => {
@@ -147,7 +185,13 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           onPageChanged={(page, numberOfPages) => {
             setActivePageIndex(page - 1); // Native library returns 1-based index
           }}
-          onError={async () => {
+          onError={async (error) => {
+            if (isPasswordError(error)) {
+              setViewerPassword('');
+              openPasswordPrompt('This PDF is password-protected. Enter the password to open it.');
+              return;
+            }
+
             onLoadComplete?.();
             Alert.alert('Viewer Error', 'PDF viewer failed. Opening fallback share.');
             try {
@@ -158,6 +202,38 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
             onClose?.();
           }}
         />
+
+        <Modal
+          visible={showPasswordPrompt}
+          transparent
+          animationType="fade"
+          onRequestClose={closePasswordPrompt}
+        >
+          <View style={styles.passwordModalOverlay}>
+            <View style={styles.passwordModalCard}>
+              <Text style={styles.passwordModalTitle}>Password Required</Text>
+              <Text style={styles.passwordModalText}>{passwordPromptMessage}</Text>
+              <TextInput
+                value={passwordInput}
+                onChangeText={setPasswordInput}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="Enter PDF password"
+                placeholderTextColor={COLORS.textMuted}
+                style={styles.passwordInput}
+              />
+              <View style={styles.passwordActionsRow}>
+                <TouchableOpacity style={styles.passwordCancelBtn} onPress={closePasswordPrompt}>
+                  <Text style={styles.passwordCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.passwordConfirmBtn} onPress={submitPassword}>
+                  <Text style={styles.passwordConfirmText}>Open</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {/* Floating Action Menu (FAB) */}
         <View style={styles.fabContainer}>
@@ -339,6 +415,69 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontSize: 16,
     fontWeight: '600',
+  },
+  passwordModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  passwordModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  passwordModalTitle: {
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  passwordModalText: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  passwordInput: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.bg,
+    color: COLORS.text,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 14,
+  },
+  passwordActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  passwordCancelBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  passwordCancelText: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  passwordConfirmBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  passwordConfirmText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   tbButtonTextDisabled: {
     color: '#888',
