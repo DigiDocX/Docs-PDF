@@ -2,11 +2,44 @@ import { useState, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
 import { PDFDocument, degrees } from 'pdf-lib';
 import { PDFDocument as SecurePDFDocument } from 'pdf-lib-plus-encrypt';
 import { Buffer } from 'buffer';
 import JSZip from 'jszip';
+import ExpoPdfToImageModule from 'expo-pdf-to-image';
+
+const OPTIMIZE_SOURCE_MAP = `${FileSystem.documentDirectory}optimize-sources.json`;
+const OPTIMIZE_SOURCE_DIR = `${FileSystem.documentDirectory}optimize-sources/`;
+
+const clampQuality = (value) => {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0.1, Math.min(1, value));
+};
+
+const clampScale = (value) => {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0.4, Math.min(1, value));
+};
+
+const toPositiveInt = (value) => {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
+};
+
+const buildNoiseBytes = (size, seedBase = Date.now()) => {
+  const total = toPositiveInt(size);
+  const bytes = new Uint8Array(total);
+  let seed = (seedBase % 2147483647) || 1;
+
+  for (let i = 0; i < total; i += 1) {
+    seed = (seed * 48271) % 2147483647;
+    bytes[i] = seed & 255;
+  }
+
+  return bytes;
+};
 
 /**
  * Custom hook for PDF management (CRUD operations)
@@ -24,6 +57,123 @@ export const usePDFManager = () => {
   const [viewerLoading, setViewerLoading] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
   const [savedZIPs, setSavedZIPs] = useState([]);
+
+  const getOptimizeSourceMap = useCallback(async () => {
+    try {
+      const info = await FileSystem.getInfoAsync(OPTIMIZE_SOURCE_MAP);
+      if (!info.exists) return {};
+      const payload = await FileSystem.readAsStringAsync(OPTIMIZE_SOURCE_MAP, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      const parsed = JSON.parse(payload);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }, []);
+
+  const setOptimizeSourceMap = useCallback(async (nextMap) => {
+    await FileSystem.writeAsStringAsync(
+      OPTIMIZE_SOURCE_MAP,
+      JSON.stringify(nextMap),
+      { encoding: FileSystem.EncodingType.UTF8 }
+    );
+  }, []);
+
+  const ensureBackupSource = useCallback(async (pdfItem) => {
+    if (!pdfItem?.uri) return null;
+
+    const map = await getOptimizeSourceMap();
+    const key = pdfItem.id || pdfItem.name || pdfItem.uri;
+    const existingBackup = map[key];
+
+    if (existingBackup) {
+      const existingInfo = await FileSystem.getInfoAsync(existingBackup);
+      if (existingInfo.exists) {
+        return existingBackup;
+      }
+    }
+
+    const dirInfo = await FileSystem.getInfoAsync(OPTIMIZE_SOURCE_DIR);
+    if (!dirInfo.exists) {
+      await FileSystem.makeDirectoryAsync(OPTIMIZE_SOURCE_DIR, { intermediates: true });
+    }
+
+    const safeName = (pdfItem.name || 'document.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const backupPath = `${OPTIMIZE_SOURCE_DIR}${Date.now()}_${safeName}`;
+    await FileSystem.copyAsync({ from: pdfItem.uri, to: backupPath });
+
+    const nextMap = { ...map, [key]: backupPath };
+    await setOptimizeSourceMap(nextMap);
+    return backupPath;
+  }, [getOptimizeSourceMap, setOptimizeSourceMap]);
+
+  const estimateOptimizedPdfSize = useCallback(async (pdfItem, profile = {}) => {
+    if (!pdfItem?.uri) {
+      return { beforeSize: 0, estimatedAfterSize: 0 };
+    }
+
+    const quality = clampQuality(profile.quality ?? 1);
+    const scale = clampScale(profile.scale ?? 1);
+    const info = await FileSystem.getInfoAsync(pdfItem.uri);
+    const beforeSize = info.size || pdfItem.size || 0;
+    const compressionFactor = quality * Math.pow(scale, 2);
+    const normalizedFactor = Math.max(0.18, Math.min(1, 0.2 + compressionFactor * 0.8));
+    const minimumSizeBytes = toPositiveInt(profile.minimumSizeBytes ?? 0);
+    const estimatedAfterSize = Math.max(
+      1,
+      Math.max(Math.round(beforeSize * normalizedFactor), minimumSizeBytes)
+    );
+
+    return {
+      beforeSize,
+      estimatedAfterSize,
+    };
+  }, []);
+
+  const inflatePdfToMinimumSize = useCallback(async (fileUri, minimumSizeBytes) => {
+    const targetBytes = toPositiveInt(minimumSizeBytes);
+    if (!fileUri || targetBytes <= 0) return null;
+
+    const initialInfo = await FileSystem.getInfoAsync(fileUri);
+    const currentSize = initialInfo.size || 0;
+    if (currentSize >= targetBytes) {
+      return currentSize;
+    }
+
+    let finalSize = currentSize;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const rawBase64 = await FileSystem.readAsStringAsync(fileUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const pdfBytes = Uint8Array.from(Buffer.from(rawBase64, 'base64'));
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+
+      const gap = Math.max(0, targetBytes - finalSize);
+      if (gap <= 0) break;
+
+      // Add a slightly larger attachment each round to account for PDF object overhead.
+      const attachBytes = Math.max(24 * 1024, Math.floor(gap * 1.2) + 8 * 1024);
+      const noise = buildNoiseBytes(attachBytes, Date.now() + attempt);
+
+      await pdfDoc.attach(noise, `submission_padding_${Date.now()}_${attempt}.bin`, {
+        mimeType: 'application/octet-stream',
+        description: 'Submission minimum-size padding',
+      });
+
+      const updatedBase64 = await pdfDoc.saveAsBase64();
+      await FileSystem.writeAsStringAsync(fileUri, updatedBase64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const updatedInfo = await FileSystem.getInfoAsync(fileUri);
+      finalSize = updatedInfo.size || 0;
+      if (finalSize >= targetBytes) break;
+    }
+
+    return finalSize;
+  }, []);
 
   // Load all saved PDFs from documentDirectory
   const loadSavedPDFs = useCallback(async () => {
@@ -123,6 +273,120 @@ export const usePDFManager = () => {
       console.error('Failed to load ZIPs:', error);
     }
   }, []);
+
+  const optimizePdf = useCallback(async (pdfItem, targetQuality = 0.6, options = {}) => {
+    if (!pdfItem?.uri) {
+      Alert.alert('Error', 'Invalid PDF file.');
+      return { success: false };
+    }
+
+    const quality = clampQuality(targetQuality);
+    const scale = clampScale(options.scale ?? 1);
+    const preferOriginal = !!options.useOriginalSource;
+
+    setLoading(true);
+    try {
+      const sourceBackupUri = await ensureBackupSource(pdfItem);
+      let workingSourceUri = pdfItem.uri;
+
+      if ((preferOriginal || sourceBackupUri) && sourceBackupUri) {
+        const backupInfo = await FileSystem.getInfoAsync(sourceBackupUri);
+        if (backupInfo.exists) {
+          workingSourceUri = sourceBackupUri;
+        }
+      }
+
+      const pageImageUris = await ExpoPdfToImageModule.convertPdfToImages(workingSourceUri);
+      if (!Array.isArray(pageImageUris) || pageImageUris.length === 0) {
+        throw new Error('No pages were rendered for optimization.');
+      }
+
+      const sourceInfo = await FileSystem.getInfoAsync(pdfItem.uri);
+      const beforeSize = sourceInfo.size || 0;
+      const optimizedPdf = await PDFDocument.create();
+
+      for (const pageImageUri of pageImageUris) {
+        const imageMeta = await ImageManipulator.manipulateAsync(pageImageUri, []);
+        const targetWidth = Math.max(120, Math.round(imageMeta.width * scale));
+
+        const processedImage = await ImageManipulator.manipulateAsync(
+          pageImageUri,
+          [{ resize: { width: targetWidth } }],
+          {
+            compress: quality,
+            format: ImageManipulator.SaveFormat.JPEG,
+            base64: true,
+          }
+        );
+
+        if (!processedImage.base64) {
+          throw new Error('Image conversion failed while optimizing PDF.');
+        }
+
+        const imageBytes = Buffer.from(processedImage.base64, 'base64');
+        const embeddedImage = await optimizedPdf.embedJpg(imageBytes);
+        const page = optimizedPdf.addPage([embeddedImage.width, embeddedImage.height]);
+        page.drawImage(embeddedImage, {
+          x: 0,
+          y: 0,
+          width: embeddedImage.width,
+          height: embeddedImage.height,
+        });
+      }
+
+      const optimizedBase64 = await optimizedPdf.saveAsBase64();
+      await FileSystem.writeAsStringAsync(pdfItem.uri, optimizedBase64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const updatedInfo = await FileSystem.getInfoAsync(pdfItem.uri);
+      const afterSize = updatedInfo.size || 0;
+
+      setPdfVersion((value) => value + 1);
+      await loadSavedPDFs();
+
+      return {
+        success: true,
+        beforeSize,
+        afterSize,
+        uri: pdfItem.uri,
+      };
+    } catch (error) {
+      Alert.alert('Optimize Error', error.message || 'Failed to optimize PDF.');
+      return { success: false, error };
+    } finally {
+      setLoading(false);
+    }
+  }, [ensureBackupSource, loadSavedPDFs]);
+
+  const upscalePdf = useCallback(async (pdfItem, options = {}) => {
+    const minimumSizeBytes = toPositiveInt(options.minimumSizeBytes ?? 0);
+    const baseResult = await optimizePdf(pdfItem, 1, {
+      scale: 1,
+      useOriginalSource: true,
+    });
+
+    if (!baseResult?.success || minimumSizeBytes <= 0 || !pdfItem?.uri) {
+      return baseResult;
+    }
+
+    setLoading(true);
+    try {
+      const paddedSize = await inflatePdfToMinimumSize(pdfItem.uri, minimumSizeBytes);
+      await loadSavedPDFs();
+      setPdfVersion((value) => value + 1);
+
+      return {
+        ...baseResult,
+        afterSize: paddedSize || baseResult.afterSize,
+      };
+    } catch (error) {
+      Alert.alert('Upscale Error', error.message || 'Failed to enforce minimum PDF size.');
+      return { ...baseResult, success: false, error };
+    } finally {
+      setLoading(false);
+    }
+  }, [inflatePdfToMinimumSize, loadSavedPDFs, optimizePdf]);
 
   // Pick multiple images from library
   const pickImages = useCallback(async () => {
@@ -666,6 +930,9 @@ export const usePDFManager = () => {
     modifyPdf,
     mergePDFs,
     lockPDF,
+    optimizePdf,
+    upscalePdf,
+    estimateOptimizedPdfSize,
     pdfVersion,
   };
 };

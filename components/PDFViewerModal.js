@@ -1,8 +1,11 @@
 import React from 'react';
 import { Modal, View, Text, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Sharing from 'expo-sharing';
 import { PDFViewer } from './PDFViewer';
 import { PDFEditGrid } from './PDFEditGrid';
+import { ensureFileUri } from '../utils/pdfUtils';
 import { COLORS } from '../constants/theme';
 
 /**
@@ -18,11 +21,15 @@ export const PDFViewerModal = ({
   onModify,
   onZipSaved,
   onLockPDF,
+  onOptimizePDF,
+  onUpscalePDF,
+  onEstimateOptimization,
   pdfVersion,
   requestedAction,
 }) => {
   const [isEditMode, setIsEditMode] = React.useState(false);
   const [viewerPageCount, setViewerPageCount] = React.useState(1);
+  const [isSending, setIsSending] = React.useState(false);
   const autoEditActions = ['split', 'rearrange', 'edit'];
   const shouldAutoEnterEdit = autoEditActions.includes(requestedAction);
 
@@ -45,6 +52,25 @@ export const PDFViewerModal = ({
     }
   };
 
+  const handleSendPdf = async () => {
+    if (isSending || !pdfItem?.uri) return;
+
+    setIsSending(true);
+    try {
+      const isAvailable = await Sharing.isAvailableAsync();
+      if (!isAvailable) {
+        return;
+      }
+
+      await Sharing.shareAsync(ensureFileUri(pdfItem.uri), {
+        mimeType: 'application/pdf',
+        dialogTitle: 'Send PDF',
+      });
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   return (
     <Modal visible={visible} onRequestClose={handleClose} animationType="slide">
       <SafeAreaView style={styles.container}>
@@ -53,9 +79,22 @@ export const PDFViewerModal = ({
             <Text style={styles.title} numberOfLines={1}>
               {pdfItem?.name || 'PDF Viewer'}
             </Text>
-            <TouchableOpacity style={styles.closeBtn} onPress={handleClose}>
-              <Text style={styles.closeBtnText}>Close</Text>
-            </TouchableOpacity>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                style={styles.sendBtn}
+                onPress={handleSendPdf}
+                disabled={!pdfItem?.uri || isSending}
+              >
+                {isSending ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialCommunityIcons name="send" size={18} color="#fff" />
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.closeBtn} onPress={handleClose}>
+                <Text style={styles.closeBtnText}>Close</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
 
@@ -84,6 +123,10 @@ export const PDFViewerModal = ({
             pdfVersion={pdfVersion}
             onZipSaved={onZipSaved}
             onLockPDF={onLockPDF}
+            onOptimizePDF={onOptimizePDF}
+            onUpscalePDF={onUpscalePDF}
+            onEstimateOptimization={onEstimateOptimization}
+            requestedAction={requestedAction}
           />
         )}
         
@@ -123,6 +166,19 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     fontSize: 16,
     fontWeight: '700',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sendBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   closeBtn: {
     backgroundColor: COLORS.bgTertiary,

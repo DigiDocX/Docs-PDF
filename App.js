@@ -53,6 +53,9 @@ export default function App() {
     modifyPdf,
     mergePDFs,
     lockPDF,
+    optimizePdf,
+    upscalePdf,
+    estimateOptimizedPdfSize,
     pdfVersion,
   } = usePDFManager();
 
@@ -92,6 +95,13 @@ export default function App() {
       subtitle: 'Rotate, delete, and refine pages',
       icon: 'file-document-edit-outline',
       color: '#5c4a8d',
+    },
+    {
+      key: 'optimize',
+      title: 'Optimize PDF',
+      subtitle: 'Compress or restore image quality',
+      icon: 'tune-variant',
+      color: '#2f5f6f',
     },
     {
       key: 'lock',
@@ -149,6 +159,11 @@ export default function App() {
     edit: {
       title: 'Pick a PDF to edit',
       subtitle: 'Rotate, delete, or split pages in edit mode.',
+      itemType: 'pdf',
+    },
+    optimize: {
+      title: 'Pick a PDF to optimize',
+      subtitle: 'Open the viewer and choose Small, Balanced, or Original.',
       itemType: 'pdf',
     },
     lock: {
@@ -399,6 +414,9 @@ export default function App() {
         onModify={modifyPdf}
         onZipSaved={loadSavedZIPs}
         onLockPDF={lockPDF}
+        onOptimizePDF={optimizePdf}
+        onUpscalePDF={upscalePdf}
+        onEstimateOptimization={estimateOptimizedPdfSize}
         pdfVersion={pdfVersion}
         requestedAction={activeFeature}
       />

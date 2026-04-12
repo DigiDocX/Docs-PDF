@@ -7,7 +7,7 @@ import * as Print from 'expo-print';
 import JSZip from 'jszip';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NativePdf, isExpoGo } from '../utils/nativeModules';
-import { ensureFileUri } from '../utils/pdfUtils';
+import { ensureFileUri, formatFileSize } from '../utils/pdfUtils';
 import { fallbackOpenWithShare } from '../utils/fallback';
 import { LockPDFModal } from './LockPDFModal';
 import { COLORS } from '../constants/theme';
@@ -17,10 +17,31 @@ import * as FileSystem from 'expo-file-system/legacy';
  * PDFViewer Component
  * Handles native PDF rendering with graceful fallback to sharing
  */
-export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, pdfVersion, onZipSaved, onLockPDF }) => {
+export const PDFViewer = ({
+  pdfItem,
+  onLoadComplete,
+  onClose,
+  onEnterEditMode,
+  requestedAction,
+  pdfVersion,
+  onZipSaved,
+  onLockPDF,
+  onOptimizePDF,
+  onUpscalePDF,
+  onEstimateOptimization,
+}) => {
+  const withVersionQuery = React.useCallback((uri) => {
+    const normalized = ensureFileUri(uri);
+    if (!normalized) return normalized;
+    // Native local-file renderers can fail when query params are attached.
+    if (normalized.startsWith('file://')) return normalized;
+    const separator = normalized.includes('?') ? '&' : '?';
+    return `${normalized}${separator}v=${Date.now()}`;
+  }, []);
+
   const [activePageIndex, setActivePageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
-  const [viewerUri, setViewerUri] = useState(() => ensureFileUri(pdfItem?.uri));
+  const [viewerUri, setViewerUri] = useState(() => withVersionQuery(pdfItem?.uri));
   const [viewerPassword, setViewerPassword] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
@@ -29,6 +50,20 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
   const [isLocking, setIsLocking] = useState(false);
   const [showLockModal, setShowLockModal] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [showOptimizeModal, setShowOptimizeModal] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [selectedOptimizeKey, setSelectedOptimizeKey] = useState('balanced');
+  const [minimumSizeMb, setMinimumSizeMb] = useState('');
+  const [sizeEstimate, setSizeEstimate] = useState({ beforeSize: 0, estimatedAfterSize: 0 });
+
+  const optimizeProfiles = React.useMemo(() => ({
+    small: { key: 'small', label: 'Small (Low Quality)', quality: 0.28, scale: 0.5 },
+    balanced: { key: 'balanced', label: 'Balanced', quality: 0.62, scale: 0.75 },
+    original: { key: 'original', label: 'Original (High Quality)', quality: 1, scale: 1 },
+  }), []);
+
+  const selectedOptimizeProfile = optimizeProfiles[selectedOptimizeKey] || optimizeProfiles.balanced;
+  const autoOptimizeOpenedRef = React.useRef(false);
 
   const isPasswordError = (error) => {
     const message = (error?.message || error || '').toString();
@@ -74,6 +109,79 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
       }
     } finally {
       setIsLocking(false);
+    }
+  };
+
+  const refreshSizeEstimate = React.useCallback(async (profile) => {
+    if (!pdfItem?.uri || !profile) return;
+
+    try {
+      const parsedMinimumMb = Number((minimumSizeMb || '').replace(',', '.'));
+      const minimumSizeBytes = Number.isFinite(parsedMinimumMb) && parsedMinimumMb > 0
+        ? Math.floor(parsedMinimumMb * 1024 * 1024)
+        : 0;
+
+      if (typeof onEstimateOptimization === 'function') {
+        const estimate = await onEstimateOptimization(pdfItem, {
+          quality: profile.quality,
+          scale: profile.scale,
+          minimumSizeBytes: profile.key === 'original' ? minimumSizeBytes : 0,
+        });
+        setSizeEstimate(estimate || { beforeSize: 0, estimatedAfterSize: 0 });
+        return;
+      }
+
+      const info = await FileSystem.getInfoAsync(pdfItem.uri);
+      const beforeSize = info.size || pdfItem.size || 0;
+      const estimateFactor = Math.max(0.2, Math.min(1, 0.2 + profile.quality * profile.scale * profile.scale * 0.8));
+      setSizeEstimate({
+        beforeSize,
+        estimatedAfterSize: Math.max(Math.round(beforeSize * estimateFactor), profile.key === 'original' ? minimumSizeBytes : 0),
+      });
+    } catch {
+      setSizeEstimate({ beforeSize: pdfItem.size || 0, estimatedAfterSize: pdfItem.size || 0 });
+    }
+  }, [minimumSizeMb, onEstimateOptimization, pdfItem]);
+
+  const openOptimizeModal = () => {
+    const balanced = optimizeProfiles.balanced;
+    setSelectedOptimizeKey(balanced.key);
+    setMinimumSizeMb('');
+    setShowOptimizeModal(true);
+    refreshSizeEstimate(balanced);
+  };
+
+  const applyOptimization = async () => {
+    if (isOptimizing || !pdfItem?.uri) return;
+
+    setIsOptimizing(true);
+    try {
+      let result = null;
+      const parsedMinimumMb = Number((minimumSizeMb || '').replace(',', '.'));
+      const minimumSizeBytes = Number.isFinite(parsedMinimumMb) && parsedMinimumMb > 0
+        ? Math.floor(parsedMinimumMb * 1024 * 1024)
+        : 0;
+
+      if (selectedOptimizeProfile.key === 'original' && typeof onUpscalePDF === 'function') {
+        result = await onUpscalePDF(pdfItem, { minimumSizeBytes });
+      } else if (typeof onOptimizePDF === 'function') {
+        result = await onOptimizePDF(pdfItem, selectedOptimizeProfile.quality, {
+          scale: selectedOptimizeProfile.scale,
+          useOriginalSource: selectedOptimizeProfile.key === 'original',
+        });
+      }
+
+      if (result?.success) {
+        setViewerUri(withVersionQuery(result.uri || pdfItem.uri));
+        setShowOptimizeModal(false);
+        await refreshSizeEstimate(selectedOptimizeProfile);
+        Alert.alert(
+          'Optimization Complete',
+          `Before: ${formatFileSize(result.beforeSize)}\nAfter: ${formatFileSize(result.afterSize)}`
+        );
+      }
+    } finally {
+      setIsOptimizing(false);
     }
   };
 
@@ -145,21 +253,31 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           from: pdfItem.uri,
           to: tempFile
         });
-        if (isMounted) setViewerUri(ensureFileUri(tempFile));
+        if (isMounted) setViewerUri(withVersionQuery(tempFile));
       } catch (err) {
         console.warn("Failed to create temporary cache file for viewer:", err);
-        if (isMounted) setViewerUri(ensureFileUri(pdfItem.uri));
+        if (isMounted) setViewerUri(withVersionQuery(pdfItem.uri));
       }
     };
     processUri();
     return () => { isMounted = false; };
-  }, [pdfItem, pdfVersion]);
+  }, [pdfItem, pdfVersion, withVersionQuery]);
+
+  React.useEffect(() => {
+    if (!showOptimizeModal) return;
+    refreshSizeEstimate(selectedOptimizeProfile);
+  }, [showOptimizeModal, selectedOptimizeProfile, refreshSizeEstimate]);
 
   React.useEffect(() => {
     setViewerPassword('');
     setPasswordInput('');
     setShowPasswordPrompt(false);
-  }, [pdfItem?.uri]);
+    setViewerUri(withVersionQuery(pdfItem?.uri));
+  }, [pdfItem?.uri, withVersionQuery]);
+
+  React.useEffect(() => {
+    autoOptimizeOpenedRef.current = false;
+  }, [pdfItem?.uri, requestedAction]);
 
   if (!pdfItem?.uri) {
     return (
@@ -181,6 +299,10 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           onLoadComplete={(numberOfPages) => {
             setPageCount(numberOfPages);
             onLoadComplete?.(numberOfPages);
+            if (requestedAction === 'optimize' && !autoOptimizeOpenedRef.current) {
+              autoOptimizeOpenedRef.current = true;
+              openOptimizeModal();
+            }
           }}
           onPageChanged={(page, numberOfPages) => {
             setActivePageIndex(page - 1); // Native library returns 1-based index
@@ -235,6 +357,86 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           </View>
         </Modal>
 
+        <Modal
+          visible={showOptimizeModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            if (!isOptimizing) setShowOptimizeModal(false);
+          }}
+        >
+          <View style={styles.passwordModalOverlay}>
+            <View style={styles.optimizeModalCard}>
+              <Text style={styles.passwordModalTitle}>Optimize PDF</Text>
+              <Text style={styles.passwordModalText}>
+                Choose one output profile and rebuild this file with adjusted image quality.
+              </Text>
+
+              {Object.values(optimizeProfiles).map((profile) => {
+                const isSelected = selectedOptimizeKey === profile.key;
+                return (
+                  <TouchableOpacity
+                    key={profile.key}
+                    style={[styles.optimizeOption, isSelected && styles.optimizeOptionActive]}
+                    onPress={() => setSelectedOptimizeKey(profile.key)}
+                    disabled={isOptimizing}
+                  >
+                    <View style={styles.optimizeRadio}>
+                      {isSelected ? <View style={styles.optimizeRadioInner} /> : null}
+                    </View>
+                    <Text style={styles.optimizeOptionText}>{profile.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+
+              <View style={styles.estimateBox}>
+                <Text style={styles.estimateText}>Estimated Size</Text>
+                <Text style={styles.estimateText}>Before: {formatFileSize(sizeEstimate.beforeSize)}</Text>
+                <Text style={styles.estimateText}>After: {formatFileSize(sizeEstimate.estimatedAfterSize)}</Text>
+              </View>
+
+              {selectedOptimizeKey === 'original' ? (
+                <View style={styles.minimumSizeWrap}>
+                  <Text style={styles.minimumSizeLabel}>Minimum Size (MB, optional)</Text>
+                  <TextInput
+                    value={minimumSizeMb}
+                    onChangeText={setMinimumSizeMb}
+                    keyboardType="decimal-pad"
+                    placeholder="e.g. 2.5"
+                    placeholderTextColor={COLORS.textMuted}
+                    style={styles.minimumSizeInput}
+                    editable={!isOptimizing}
+                  />
+                  <Text style={styles.minimumSizeHint}>
+                    Use this when submissions require files larger than a threshold.
+                  </Text>
+                </View>
+              ) : null}
+
+              <View style={styles.passwordActionsRow}>
+                <TouchableOpacity
+                  style={styles.passwordCancelBtn}
+                  onPress={() => setShowOptimizeModal(false)}
+                  disabled={isOptimizing}
+                >
+                  <Text style={styles.passwordCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.passwordConfirmBtn}
+                  onPress={applyOptimization}
+                  disabled={isOptimizing}
+                >
+                  {isOptimizing ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={styles.passwordConfirmText}>Apply</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
         {/* Floating Action Menu (FAB) */}
         <View style={styles.fabContainer}>
           <LockPDFModal
@@ -250,17 +452,17 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           {isMenuOpen && (
             <View style={styles.menuItems}>
               <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); handlePrint(); }}
-                disabled={isZipping || isLocking}
+                disabled={isZipping || isLocking || isOptimizing}
               >
                 <MaterialCommunityIcons name="printer" size={24} color="#fff" />
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); handleZip(); }}
-                disabled={isZipping || isLocking}
+                disabled={isZipping || isLocking || isOptimizing}
               >
                 {isZipping ? (
                   <ActivityIndicator size="small" color="#fff" />
@@ -270,12 +472,12 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
                 onPress={() => {
                   setIsMenuOpen(false);
                   setShowLockModal(true);
                 }}
-                disabled={isZipping || isLocking}
+                disabled={isZipping || isLocking || isOptimizing}
               >
                 {isLocking ? (
                   <ActivityIndicator size="small" color="#fff" />
@@ -285,9 +487,24 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking) && styles.tbButtonDisabled]}
+                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                onPress={() => {
+                  setIsMenuOpen(false);
+                  openOptimizeModal();
+                }}
+                disabled={isZipping || isLocking || isOptimizing}
+              >
+                {isOptimizing ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialCommunityIcons name="tune-variant" size={24} color="#fff" />
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
                 onPress={() => { setIsMenuOpen(false); onEnterEditMode?.(pageCount); }}
-                disabled={isZipping || isLocking}
+                disabled={isZipping || isLocking || isOptimizing}
               >
                 <MaterialCommunityIcons name="file-document-edit-outline" size={24} color="#fff" />
               </TouchableOpacity>
@@ -302,10 +519,16 @@ export const PDFViewer = ({ pdfItem, onLoadComplete, onClose, onEnterEditMode, p
           </TouchableOpacity>
         </View>
 
-        {(isZipping || isLocking) && (
+        {(isZipping || isLocking || isOptimizing) && (
           <View style={styles.loadingOverlay}>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>{isLocking ? 'Encrypting PDF...' : 'Creating ZIP Archive...'}</Text>
+            <Text style={styles.loadingText}>
+              {isOptimizing
+                ? 'Optimizing PDF...'
+                : isLocking
+                  ? 'Encrypting PDF...'
+                  : 'Creating ZIP Archive...'}
+            </Text>
           </View>
         )}
       </View>
@@ -431,6 +654,86 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  optimizeModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    gap: 10,
+  },
+  optimizeOption: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.bg,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  optimizeOptionActive: {
+    borderColor: COLORS.primary,
+  },
+  optimizeOptionText: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  optimizeRadio: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  optimizeRadioInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.primary,
+  },
+  estimateBox: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: COLORS.bg,
+  },
+  estimateText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 18,
+  },
+  minimumSizeWrap: {
+    gap: 6,
+  },
+  minimumSizeLabel: {
+    color: COLORS.text,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  minimumSizeInput: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.bg,
+    color: COLORS.text,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  minimumSizeHint: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    lineHeight: 15,
   },
   passwordModalTitle: {
     color: COLORS.text,
