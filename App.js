@@ -43,6 +43,7 @@ export default function App() {
     loadSavedPDFs,
     loadSavedZIPs,
     pickImages,
+    importPDF,
     createPDF,
     openPDF,
     openZIP,
@@ -60,6 +61,7 @@ export default function App() {
   } = usePDFManager();
 
   const [activeTab, setActiveTab] = useState('pdfs');
+  const [createModeTab, setCreateModeTab] = useState('create');
   const [selectedPDFsState, setSelectedPDFsState] = useState([]);
   const [activeFeature, setActiveFeature] = useState(null);
   const [viewMode, setViewMode] = useState('landing');
@@ -97,6 +99,13 @@ export default function App() {
       color: '#5c4a8d',
     },
     {
+      key: 'annotate',
+      title: 'Annotate PDF',
+      subtitle: 'Draw, highlight, add text, and mark up pages',
+      icon: 'draw',
+      color: '#b45f06',
+    },
+    {
       key: 'optimize',
       title: 'Optimize PDF',
       subtitle: 'Compress or restore image quality',
@@ -132,6 +141,13 @@ export default function App() {
       color: '#5f7a32',
     },
     {
+      key: 'upload',
+      title: 'Upload PDF',
+      subtitle: 'Import an existing PDF from your device',
+      icon: 'upload-box-outline',
+      color: '#2f6672',
+    },
+    {
       key: 'library',
       title: 'Browse Library',
       subtitle: 'View, rename, delete PDFs and ZIPs',
@@ -159,6 +175,11 @@ export default function App() {
     edit: {
       title: 'Pick a PDF to edit',
       subtitle: 'Rotate, delete, or split pages in edit mode.',
+      itemType: 'pdf',
+    },
+    annotate: {
+      title: 'Pick a PDF to annotate',
+      subtitle: 'Open the viewer in annotation mode to draw and add text.',
       itemType: 'pdf',
     },
     optimize: {
@@ -213,7 +234,8 @@ export default function App() {
     setActiveFeature(featureKey);
     setSelectedPDFsState([]);
 
-    if (featureKey === 'create') {
+    if (featureKey === 'create' || featureKey === 'upload') {
+      setCreateModeTab(featureKey === 'upload' ? 'upload' : 'create');
       setViewMode('create');
       return;
     }
@@ -280,34 +302,77 @@ export default function App() {
           <MaterialCommunityIcons name="arrow-left" size={18} color="#fff" />
           <Text style={styles.backButtonText}>Features</Text>
         </TouchableOpacity>
-        <Text style={styles.flowTitle}>Create PDF From Images</Text>
-        <Text style={styles.flowSubtitle}>Select images and generate a new PDF file.</Text>
+        <Text style={styles.flowTitle}>Create or Upload PDF</Text>
+        <Text style={styles.flowSubtitle}>
+          {createModeTab === 'create'
+            ? 'Select images and generate a new PDF file.'
+            : 'Pick a PDF from device storage and add it to your library.'}
+        </Text>
+
+        <View style={styles.createModeTabRow}>
+          <TouchableOpacity
+            onPress={() => setCreateModeTab('create')}
+            style={[styles.tabBtn, createModeTab === 'create' && styles.tabBtnActive]}
+          >
+            <Text style={[styles.tabText, createModeTab === 'create' && styles.tabTextActive]}>Create</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setCreateModeTab('upload')}
+            style={[styles.tabBtn, createModeTab === 'upload' && styles.tabBtnActive]}
+          >
+            <Text style={[styles.tabText, createModeTab === 'upload' && styles.tabTextActive]}>Upload</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.createPanel}>
-        <TouchableOpacity style={styles.primaryCta} onPress={pickImages}>
-          <MaterialCommunityIcons name="image-multiple" size={18} color="#fff" />
-          <Text style={styles.primaryCtaText}>Select Images</Text>
-        </TouchableOpacity>
+        {createModeTab === 'create' ? (
+          <>
+            <TouchableOpacity style={styles.primaryCta} onPress={pickImages}>
+              <MaterialCommunityIcons name="image-multiple" size={18} color="#fff" />
+              <Text style={styles.primaryCtaText}>Select Images</Text>
+            </TouchableOpacity>
 
-        <Text style={styles.selectionHint}>
-          {selectedImages.length} image{selectedImages.length !== 1 ? 's' : ''} selected
-        </Text>
+            <Text style={styles.selectionHint}>
+              {selectedImages.length} image{selectedImages.length !== 1 ? 's' : ''} selected
+            </Text>
 
-        <TouchableOpacity
-          style={[styles.secondaryCta, (loading || selectedImages.length === 0) && styles.disabledCta]}
-          onPress={createPDF}
-          disabled={loading || selectedImages.length === 0}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <>
-              <MaterialCommunityIcons name="file-pdf-box" size={18} color="#fff" />
-              <Text style={styles.secondaryCtaText}>Create and Save PDF</Text>
-            </>
-          )}
-        </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.secondaryCta, (loading || selectedImages.length === 0) && styles.disabledCta]}
+              onPress={createPDF}
+              disabled={loading || selectedImages.length === 0}
+            >
+              {loading ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <MaterialCommunityIcons name="file-pdf-box" size={18} color="#fff" />
+                  <Text style={styles.secondaryCtaText}>Create and Save PDF</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={[styles.primaryCta, loading && styles.disabledCta]}
+              onPress={importPDF}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <MaterialCommunityIcons name="upload" size={18} color="#fff" />
+                  <Text style={styles.primaryCtaText}>Select PDF From Device</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <Text style={styles.selectionHint}>
+              Imported PDFs appear below and in your library feature.
+            </Text>
+          </>
+        )}
       </View>
 
       <View style={{ flex: 1 }}>
@@ -579,6 +644,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   tabRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    gap: 10,
+  },
+  createModeTabRow: {
     marginTop: 12,
     flexDirection: 'row',
     gap: 10,

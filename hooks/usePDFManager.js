@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
 import { PDFDocument, degrees } from 'pdf-lib';
@@ -400,6 +401,51 @@ export const usePDFManager = () => {
       setSelectedImages(result.assets || []);
     }
   }, []);
+
+  // Import a single PDF from device storage into the app library
+  const importPDF = useCallback(async () => {
+    try {
+      setLoading(true);
+
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        multiple: false,
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled) {
+        return false;
+      }
+
+      const picked = result.assets?.[0];
+      if (!picked?.uri) {
+        Alert.alert('Upload Error', 'No PDF file was selected.');
+        return false;
+      }
+
+      const originalName = (picked.name || 'Imported.pdf').replace(/[/\\]/g, '_');
+      const normalizedName = originalName.toLowerCase().endsWith('.pdf')
+        ? originalName
+        : `${originalName}.pdf`;
+      const safeName = normalizedName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fileName = `Uploaded_${Date.now()}_${safeName}`;
+      const fileUri = FileSystem.documentDirectory + fileName;
+
+      await FileSystem.copyAsync({
+        from: picked.uri,
+        to: fileUri,
+      });
+
+      await loadSavedPDFs();
+      Alert.alert('Success', 'PDF imported to your library.');
+      return true;
+    } catch (error) {
+      Alert.alert('Upload Error', error.message || 'Failed to upload PDF');
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, [loadSavedPDFs]);
 
   // Create PDF from selected images
   const createPDF = useCallback(async () => {
@@ -920,6 +966,7 @@ export const usePDFManager = () => {
     loadSavedPDFs,
     loadSavedZIPs,
     pickImages,
+    importPDF,
     createPDF,
     openPDF,
     openZIP,
