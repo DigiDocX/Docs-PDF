@@ -16,6 +16,7 @@ import { usePDFManager } from './hooks/usePDFManager';
 import { PDFList } from './components/PDFList';
 import { RenameModal } from './components/RenameModal';
 import { PDFViewerModal } from './components/PDFViewerModal';
+import { ManagePdfPagesModal } from './components/ManagePdfPagesModal';
 
 // Import styles
 import { STYLES, COLORS } from './constants/theme';
@@ -65,6 +66,8 @@ export default function App() {
   const [selectedPDFsState, setSelectedPDFsState] = useState([]);
   const [activeFeature, setActiveFeature] = useState(null);
   const [viewMode, setViewMode] = useState('landing');
+  const [addPageModalVisible, setAddPageModalVisible] = useState(false);
+  const [selectedPdfForPages, setSelectedPdfForPages] = useState(null);
 
   const isMergeMode = activeFeature === 'merge';
   const isSelectionMode = isMergeMode && selectedPDFsState.length > 0 && activeTab === 'pdfs';
@@ -104,6 +107,13 @@ export default function App() {
       subtitle: 'Draw, highlight, add text, and mark up pages',
       icon: 'draw',
       color: '#b45f06',
+    },
+    {
+      key: 'addPage',
+      title: 'Add Pages',
+      subtitle: 'Insert or append blank pages at any position',
+      icon: 'plus-box-outline',
+      color: '#2d5f3f',
     },
     {
       key: 'optimize',
@@ -182,6 +192,11 @@ export default function App() {
       subtitle: 'Open the viewer in annotation mode to draw and add text.',
       itemType: 'pdf',
     },
+    addPage: {
+      title: 'Pick a PDF to add pages',
+      subtitle: 'Open the page manager to insert or append blank pages.',
+      itemType: 'pdf',
+    },
     optimize: {
       title: 'Pick a PDF to optimize',
       subtitle: 'Open the viewer and choose Small, Balanced, or Original.',
@@ -240,6 +255,12 @@ export default function App() {
       return;
     }
 
+    if (featureKey === 'addPage') {
+      setActiveTab('pdfs');
+      setViewMode('picker');
+      return;
+    }
+
     if (featureKey === 'library') {
       setActiveTab('pdfs');
     }
@@ -264,6 +285,13 @@ export default function App() {
       openZIP(pdfItem);
       return;
     }
+
+    if (activeFeature === 'addPage') {
+      setSelectedPdfForPages(pdfItem);
+      setAddPageModalVisible(true);
+      return;
+    }
+
     openPDF(pdfItem);
   };
 
@@ -473,7 +501,6 @@ export default function App() {
       <PDFViewerModal
         visible={viewerModalVisible}
         pdfItem={activePdf}
-        isLoading={viewerLoading}
         onLoadComplete={() => setViewerLoading(false)}
         onClose={closePDFViewer}
         onModify={modifyPdf}
@@ -484,6 +511,24 @@ export default function App() {
         onEstimateOptimization={estimateOptimizedPdfSize}
         pdfVersion={pdfVersion}
         requestedAction={activeFeature}
+      />
+
+      {/* Add Page Modal */}
+      <ManagePdfPagesModal
+        visible={addPageModalVisible}
+        pdfPath={selectedPdfForPages?.uri}
+        currentPageCount={selectedPdfForPages?.pageCount || 1}
+        onCancel={() => {
+          setAddPageModalVisible(false);
+          setSelectedPdfForPages(null);
+        }}
+        onSuccess={(newVersion) => {
+          setAddPageModalVisible(false);
+          setSelectedPdfForPages(null);
+          setViewMode('landing');
+          setActiveFeature(null);
+          loadSavedPDFs(); // Reload PDFs to reflect changes
+        }}
       />
 
       {viewMode === 'landing' && renderFeatureLanding()}

@@ -26,14 +26,13 @@ const isExpoGo =
   ConstantsModule?.executionEnvironment === 'storeClient' ||
   ConstantsModule?.appOwnership === 'expo';
 
-// Lazy-load native PDF only in development builds
-if (!isExpoGo) {
-  try {
-    NativePdf = require('react-native-pdf').default;
-  } catch (err) {
-    console.warn('Failed to load react-native-pdf native module:', err.message);
-    NativePdf = null;
-  }
+// Try loading native PDF whenever available in runtime.
+// If the module is missing (e.g. Expo Go), this gracefully falls back.
+try {
+  NativePdf = require('react-native-pdf').default;
+} catch (err) {
+  console.warn('Failed to load react-native-pdf native module:', err.message);
+  NativePdf = null;
 }
 
 export { SharingModule, ConstantsModule, NativePdf, isExpoGo };

@@ -95,6 +95,8 @@ export const PDFViewer = ({
   const activePathIdRef = React.useRef(null);
   const draggingTextIdRef = React.useRef(null);
   const dragTextOffsetRef = React.useRef({ x: 0, y: 0 });
+  const fallbackReportedRef = React.useRef('');
+  const shouldUseAndroidPainter = Platform.OS === 'android' && requestedAction === 'annotate';
 
   const hexToRgb = React.useCallback((hex) => {
     const value = (hex || '').replace('#', '');
@@ -943,6 +945,18 @@ export const PDFViewer = ({
     }
   }, [requestedAction, pdfItem?.uri]);
 
+  React.useEffect(() => {
+    const key = `${pdfItem?.uri || ''}|${requestedAction || ''}`;
+    const usingAndroidPainter = shouldUseAndroidPainter && !isExpoGo && viewerUri;
+
+    if (fallbackReportedRef.current === key) return;
+
+    if (pdfItem?.uri && !usingAndroidPainter && (!NativePdf || !viewerUri)) {
+      fallbackReportedRef.current = key;
+      onLoadComplete?.(0);
+    }
+  }, [pdfItem?.uri, requestedAction, shouldUseAndroidPainter, viewerUri, onLoadComplete]);
+
   if (!pdfItem?.uri) {
     return (
       <View style={styles.errorContainer}>
@@ -950,8 +964,6 @@ export const PDFViewer = ({
       </View>
     );
   }
-
-  const shouldUseAndroidPainter = Platform.OS === 'android' && requestedAction === 'annotate';
 
   if (shouldUseAndroidPainter && !isExpoGo && viewerUri) {
     return (
@@ -981,8 +993,8 @@ export const PDFViewer = ({
     );
   }
 
-  // Native viewer available
-  if (!isExpoGo && NativePdf && viewerUri) {
+  // Native viewer available (works in dev builds when module is linked)
+  if (NativePdf && viewerUri) {
     return (
       <View style={{ flex: 1 }}>
         <View
@@ -1248,7 +1260,7 @@ export const PDFViewer = ({
     <View style={styles.errorContainer}>
       <Text style={styles.errorTitle}>In-app PDF Viewer Unavailable</Text>
       <Text style={styles.errorText}>
-        PDF viewer requires a Development Build. Use expo prebuild to create a native app.
+        Native PDF rendering is unavailable in this runtime. Open the file using your device PDF app.
       </Text>
       <TouchableOpacity
         style={styles.fallbackBtn}

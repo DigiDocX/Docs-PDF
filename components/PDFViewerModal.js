@@ -15,7 +15,6 @@ import { COLORS } from '../constants/theme';
 export const PDFViewerModal = ({
   visible,
   pdfItem,
-  isLoading,
   onLoadComplete,
   onClose,
   onModify,
@@ -98,12 +97,7 @@ export const PDFViewerModal = ({
           </View>
         )}
 
-        {isLoading && (
-          <View style={styles.loadingOverlay}>
-            <ActivityIndicator color={COLORS.accentLight} size="large" />
-            <Text style={styles.loadingText}>Loading PDF...</Text>
-          </View>
-        )}
+
 
         {pdfItem && !isEditMode && (
           <PDFViewer
@@ -191,21 +185,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: COLORS.overlayLight,
-    zIndex: 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 10,
-  },
-  loadingText: {
-    color: '#c9d7ff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+
 });
