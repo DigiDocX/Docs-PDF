@@ -10,6 +10,7 @@ import { PDFDocument as SecurePDFDocument } from 'pdf-lib-plus-encrypt';
 import { Buffer } from 'buffer';
 import JSZip from 'jszip';
 import ExpoPdfToImageModule from 'expo-pdf-to-image';
+import { applyWatermark, applyPageNumbersToPdfDocument, managePdfPages } from '../utils/pdfUtils';
 
 const OPTIMIZE_SOURCE_MAP = `${FileSystem.documentDirectory}optimize-sources.json`;
 const OPTIMIZE_SOURCE_DIR = `${FileSystem.documentDirectory}optimize-sources/`;
@@ -58,6 +59,15 @@ export const usePDFManager = () => {
   const [viewerLoading, setViewerLoading] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
   const [savedZIPs, setSavedZIPs] = useState([]);
+
+  const defaultPageNumberOptions = {
+    startNumber: 1,
+    includeTotal: false,
+    position: 'BOTTOM_CENTER',
+    fontSize: 11,
+    margin: 28,
+    color: '#333333',
+  };
 
   const getOptimizeSourceMap = useCallback(async () => {
     try {
@@ -335,6 +345,8 @@ export const usePDFManager = () => {
         });
       }
 
+      await applyPageNumbersToPdfDocument(optimizedPdf, defaultPageNumberOptions);
+      await applyWatermark(optimizedPdf);
       const optimizedBase64 = await optimizedPdf.saveAsBase64();
       await FileSystem.writeAsStringAsync(pdfItem.uri, optimizedBase64, {
         encoding: FileSystem.EncodingType.Base64,
@@ -436,6 +448,8 @@ export const usePDFManager = () => {
         to: fileUri,
       });
 
+      await managePdfPages(fileUri, 'APPLY_PAGE_NUMBERS', defaultPageNumberOptions);
+
       await loadSavedPDFs();
       Alert.alert('Success', 'PDF imported to your library.');
       return true;
@@ -489,6 +503,8 @@ export const usePDFManager = () => {
         });
       }
 
+      await applyPageNumbersToPdfDocument(pdfDoc, defaultPageNumberOptions);
+      await applyWatermark(pdfDoc);
       const pdfBase64 = await pdfDoc.saveAsBase64();
       const timestamp = Date.now();
       const fileName = `Report_${timestamp}.pdf`;
@@ -604,6 +620,8 @@ export const usePDFManager = () => {
           await FileSystem.writeAsStringAsync(destUri, pdfBase64, {
             encoding: 'base64',
           });
+
+          await managePdfPages(destUri, 'APPLY_PAGE_NUMBERS', defaultPageNumberOptions);
           extractedCount++;
         } else if (
           lowerName.endsWith('.jpg') ||
@@ -633,6 +651,8 @@ export const usePDFManager = () => {
             height: embeddedImage.height,
           });
 
+          await applyPageNumbersToPdfDocument(pdfDoc, defaultPageNumberOptions);
+          await applyWatermark(pdfDoc);
           const pdfBase64 = await pdfDoc.saveAsBase64();
           const timestamp = Date.now();
           const pdfName = baseName.replace(/\.[^.]+$/, '.pdf');
@@ -689,6 +709,53 @@ export const usePDFManager = () => {
     ]);
   }, [loadSavedPDFs, loadSavedZIPs]);
 
+  // Apply page numbers to all PDFs currently in the library
+  const applyPageNumbersToAllPDFs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const files = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+      const pdfFiles = files.filter((file) => file.toLowerCase().endsWith('.pdf'));
+
+      if (pdfFiles.length === 0) {
+        Alert.alert('Notice', 'No PDFs found in your library.');
+        return { success: true, processed: 0, failed: 0 };
+      }
+
+      let processed = 0;
+      let failed = 0;
+
+      for (const fileName of pdfFiles) {
+        const fileUri = FileSystem.documentDirectory + fileName;
+        try {
+          await managePdfPages(fileUri, 'APPLY_PAGE_NUMBERS', defaultPageNumberOptions);
+          processed += 1;
+        } catch (error) {
+          console.error(`Failed numbering for ${fileName}:`, error);
+          failed += 1;
+        }
+      }
+
+      setPdfVersion((value) => value + 1);
+      await loadSavedPDFs();
+
+      if (failed === 0) {
+        Alert.alert('Success', `Applied page numbers to ${processed} PDF(s).`);
+      } else {
+        Alert.alert(
+          'Completed with Errors',
+          `Applied page numbers to ${processed} PDF(s). Failed: ${failed}.`
+        );
+      }
+
+      return { success: failed === 0, processed, failed };
+    } catch (error) {
+      Alert.alert('Error', error.message || 'Failed to apply page numbers in bulk.');
+      return { success: false, processed: 0, failed: 0, error };
+    } finally {
+      setLoading(false);
+    }
+  }, [loadSavedPDFs]);
+
 // Note: standalone Extract is removed, logic moved to modifyPdf
 
   // Merge multiple PDFs into one
@@ -705,6 +772,8 @@ export const usePDFManager = () => {
         copiedPages.forEach((page) => mergedPdf.addPage(page));
       }
       
+      await applyPageNumbersToPdfDocument(mergedPdf, defaultPageNumberOptions);
+      await applyWatermark(mergedPdf);
       const pdfBytes = await mergedPdf.saveAsBase64();
       const timestamp = Date.now();
       const fileName = `Merged_Report_${timestamp}.pdf`;
@@ -761,6 +830,8 @@ export const usePDFManager = () => {
 
       const sourceBytes = Uint8Array.from(Buffer.from(sourceBase64, 'base64'));
       const securePdf = await SecurePDFDocument.load(sourceBytes, { ignoreEncryption: true });
+
+      await applyWatermark(securePdf);
 
       await securePdf.encrypt({
         userPassword,
@@ -832,6 +903,8 @@ export const usePDFManager = () => {
         const copiedPages = await reorderedPdf.copyPages(pdfDoc, orderedPages);
         copiedPages.forEach((page) => reorderedPdf.addPage(page));
 
+        await applyPageNumbersToPdfDocument(reorderedPdf, defaultPageNumberOptions);
+
         const outputBase64 = await reorderedPdf.saveAsBase64();
         const timestamp = Date.now();
         const fileName = `Rearranged_${timestamp}.pdf`;
@@ -886,6 +959,8 @@ export const usePDFManager = () => {
         // Copy selected pages
         const copiedPages = await newPdf.copyPages(pdfDoc, pagesToExtract);
         copiedPages.forEach(p => newPdf.addPage(p));
+
+        await applyPageNumbersToPdfDocument(newPdf, defaultPageNumberOptions);
         
         // Save new split Document
         const newPdfBytes = await newPdf.saveAsBase64();
@@ -899,6 +974,7 @@ export const usePDFManager = () => {
         sortedDesc.forEach(idx => pdfDoc.removePage(idx));
 
         // Save modification changes on existing Document
+        await applyPageNumbersToPdfDocument(pdfDoc, defaultPageNumberOptions);
         const pdfBytes = await pdfDoc.saveAsBase64();
         await FileSystem.writeAsStringAsync(fileUri, pdfBytes, { encoding: 'base64' });
 
@@ -933,6 +1009,7 @@ export const usePDFManager = () => {
           pdfDoc.removePage(change.pageIndex);
         });
 
+      await applyPageNumbersToPdfDocument(pdfDoc, defaultPageNumberOptions);
       const pdfBytes = await pdfDoc.saveAsBase64();
       await FileSystem.writeAsStringAsync(fileUri, pdfBytes, { encoding: 'base64' });
 
@@ -980,6 +1057,7 @@ export const usePDFManager = () => {
     optimizePdf,
     upscalePdf,
     estimateOptimizedPdfSize,
+    applyPageNumbersToAllPDFs,
     pdfVersion,
   };
 };

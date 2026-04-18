@@ -8,9 +8,19 @@ import {
   StyleSheet,
   ActivityIndicator,
   Switch,
+  Alert,
 } from 'react-native';
 import { usePdfPageManager } from '../hooks/usePdfPageManager';
 import { COLORS } from '../constants/theme';
+
+const POSITION_OPTIONS = [
+  { key: 'BOTTOM_LEFT', label: 'Bottom Left' },
+  { key: 'BOTTOM_CENTER', label: 'Bottom Center' },
+  { key: 'BOTTOM_RIGHT', label: 'Bottom Right' },
+  { key: 'TOP_LEFT', label: 'Top Left' },
+  { key: 'TOP_CENTER', label: 'Top Center' },
+  { key: 'TOP_RIGHT', label: 'Top Right' },
+];
 
 /**
  * Modal for managing PDF pages (add/insert blank pages)
@@ -27,22 +37,35 @@ export const ManagePdfPagesModal = ({
   visible,
   pdfPath,
   currentPageCount = 0,
+  initialMode = 'ADD_END',
   onCancel,
   onSuccess,
 }) => {
-  const { isProcessing, addPageAtEnd, insertPageAt, error, clearError } =
+  const { isProcessing, addPageAtEnd, insertPageAt, applyPageNumbers, error, clearError } =
     usePdfPageManager();
 
   const [pageIndex, setPageIndex] = useState('');
-  const [mode, setMode] = useState('ADD_END'); // 'ADD_END' or 'INSERT_AT'
+  const [mode, setMode] = useState(initialMode); // 'ADD_END' | 'INSERT_AT' | 'APPLY_NUMBERS'
+  const [startNumber, setStartNumber] = useState('1');
+  const [includeTotal, setIncludeTotal] = useState(false);
+  const [numberPosition, setNumberPosition] = useState('BOTTOM_CENTER');
 
   useEffect(() => {
     if (!visible) {
       setPageIndex('');
-      setMode('ADD_END');
+      setMode(initialMode);
+      setStartNumber('1');
+      setIncludeTotal(false);
+      setNumberPosition('BOTTOM_CENTER');
       clearError();
     }
-  }, [visible, clearError]);
+  }, [visible, clearError, initialMode]);
+
+  useEffect(() => {
+    if (visible) {
+      setMode(initialMode);
+    }
+  }, [visible, initialMode]);
 
   const handleAddEnd = async () => {
     if (!pdfPath) return;
@@ -69,6 +92,36 @@ export const ManagePdfPagesModal = ({
     }
   };
 
+  const handleApplyNumbers = async () => {
+    if (!pdfPath) return;
+
+    const parsedStart = parseInt(startNumber, 10);
+    if (isNaN(parsedStart) || parsedStart < 1) {
+      Alert.alert('Invalid Input', 'Start number must be 1 or greater.');
+      return;
+    }
+
+    const version = await applyPageNumbers(
+      pdfPath,
+      {
+        startNumber: parsedStart,
+        includeTotal,
+        position: numberPosition,
+        fontSize: 11,
+        margin: 28,
+        color: '#333333',
+      },
+      onSuccess
+    );
+
+    if (version) {
+      setStartNumber('1');
+      setIncludeTotal(false);
+      setNumberPosition('BOTTOM_CENTER');
+      setMode('ADD_END');
+    }
+  };
+
   const maxPageIndex = currentPageCount; // Can insert at the end as well
   const pageIndexError =
     pageIndex &&
@@ -86,7 +139,7 @@ export const ManagePdfPagesModal = ({
       <View style={styles.overlay}>
         <View style={styles.card}>
           <Text style={styles.title}>Manage PDF Pages</Text>
-          <Text style={styles.subtitle}>Add or insert blank A4 pages</Text>
+          <Text style={styles.subtitle}>Add pages or apply page numbers</Text>
 
           {/* Mode Selection */}
           <View style={styles.modeSection}>
@@ -118,6 +171,19 @@ export const ManagePdfPagesModal = ({
                   </View>
                   <Text style={styles.radioLabel}>Insert at Position</Text>
                 </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.radioOption}
+                  onPress={() => setMode('APPLY_NUMBERS')}
+                  disabled={isProcessing}
+                >
+                  <View style={styles.radio}>
+                    {mode === 'APPLY_NUMBERS' ? (
+                      <View style={styles.radioInner} />
+                    ) : null}
+                  </View>
+                  <Text style={styles.radioLabel}>Apply Page Numbers</Text>
+                </TouchableOpacity>
               </View>
             </View>
           </View>
@@ -143,6 +209,57 @@ export const ManagePdfPagesModal = ({
                   Index must be between 0 and {maxPageIndex}
                 </Text>
               )}
+            </View>
+          )}
+
+          {/* Page Numbering Options */}
+          {mode === 'APPLY_NUMBERS' && (
+            <View style={styles.inputSection}>
+              <Text style={styles.inputLabel}>Start Number</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Enter start number (e.g., 1)"
+                placeholderTextColor={COLORS.textMuted}
+                keyboardType="number-pad"
+                value={startNumber}
+                onChangeText={setStartNumber}
+                editable={!isProcessing}
+              />
+
+              <Text style={styles.inputLabel}>Position</Text>
+              <View style={styles.positionGrid}>
+                {POSITION_OPTIONS.map((item) => (
+                  <TouchableOpacity
+                    key={item.key}
+                    style={[
+                      styles.positionBtn,
+                      numberPosition === item.key && styles.positionBtnActive,
+                    ]}
+                    onPress={() => setNumberPosition(item.key)}
+                    disabled={isProcessing}
+                  >
+                    <Text
+                      style={[
+                        styles.positionBtnText,
+                        numberPosition === item.key && styles.positionBtnTextActive,
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <View style={styles.toggleRow}>
+                <Text style={styles.toggleLabel}>Show total pages (e.g., 3 / 12)</Text>
+                <Switch
+                  value={includeTotal}
+                  onValueChange={setIncludeTotal}
+                  disabled={isProcessing}
+                  trackColor={{ false: COLORS.bgLight, true: COLORS.primary }}
+                  thumbColor={includeTotal ? '#e9f2ff' : '#c8cde2'}
+                />
+              </View>
             </View>
           )}
 
@@ -187,14 +304,28 @@ export const ManagePdfPagesModal = ({
 
             <TouchableOpacity
               style={[styles.confirmBtn, isProcessing && styles.confirmBtnDisabled]}
-              onPress={mode === 'ADD_END' ? handleAddEnd : handleInsertAt}
-              disabled={isProcessing || (mode === 'INSERT_AT' && !pageIndex)}
+              onPress={
+                mode === 'ADD_END'
+                  ? handleAddEnd
+                  : mode === 'INSERT_AT'
+                    ? handleInsertAt
+                    : handleApplyNumbers
+              }
+              disabled={
+                isProcessing
+                || (mode === 'INSERT_AT' && !pageIndex)
+                || (mode === 'APPLY_NUMBERS' && !startNumber)
+              }
             >
               {isProcessing ? (
                 <ActivityIndicator size="small" color="#fff" />
               ) : (
                 <Text style={styles.confirmBtnText}>
-                  {mode === 'ADD_END' ? 'Add Page' : 'Insert Page'}
+                  {mode === 'ADD_END'
+                    ? 'Add Page'
+                    : mode === 'INSERT_AT'
+                      ? 'Insert Page'
+                      : 'Apply Numbers'}
                 </Text>
               )}
             </TouchableOpacity>
@@ -208,21 +339,23 @@ export const ManagePdfPagesModal = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: COLORS.overlay,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
   },
   card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 14,
     padding: 20,
     maxWidth: 400,
     width: '100%',
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   title: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: '700',
     color: COLORS.text,
     marginBottom: 4,
   },
@@ -256,7 +389,7 @@ const styles = StyleSheet.create({
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: COLORS.primary,
+    borderColor: COLORS.accentLight,
     marginRight: 12,
     justifyContent: 'center',
     alignItems: 'center',
@@ -265,7 +398,7 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: COLORS.primary,
+    backgroundColor: COLORS.accentLight,
   },
   radioLabel: {
     fontSize: 14,
@@ -282,7 +415,8 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bg,
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -293,6 +427,43 @@ const styles = StyleSheet.create({
   inputError: {
     borderColor: '#ef4444',
   },
+  positionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  positionBtn: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    backgroundColor: COLORS.bg,
+  },
+  positionBtnActive: {
+    borderColor: COLORS.accentLight,
+    backgroundColor: 'rgba(138, 180, 248, 0.18)',
+  },
+  positionBtnText: {
+    fontSize: 12,
+    color: COLORS.text,
+  },
+  positionBtnTextActive: {
+    color: COLORS.accentLight,
+    fontWeight: '600',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  toggleLabel: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.text,
+  },
   hint: {
     fontSize: 12,
     color: COLORS.textMuted,
@@ -300,15 +471,17 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 12,
-    color: '#ef4444',
+    color: '#ff8c8c',
   },
   infoBox: {
-    backgroundColor: '#f0f4f8',
+    backgroundColor: COLORS.bg,
     borderRadius: 8,
     padding: 12,
     marginBottom: 12,
     borderLeftWidth: 4,
-    borderLeftColor: COLORS.primary,
+    borderLeftColor: COLORS.accentLight,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   infoTitle: {
     fontSize: 12,
@@ -322,16 +495,18 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   errorBox: {
-    backgroundColor: '#fef2f2',
+    backgroundColor: 'rgba(95, 58, 58, 0.45)',
     borderRadius: 8,
     padding: 12,
     marginBottom: 12,
     borderLeftWidth: 4,
-    borderLeftColor: '#ef4444',
+    borderLeftColor: '#ff7b7b',
+    borderWidth: 1,
+    borderColor: '#7a4343',
   },
   errorBoxText: {
     fontSize: 12,
-    color: '#dc2626',
+    color: '#ffb2b2',
     lineHeight: 16,
   },
   processingBox: {
@@ -340,8 +515,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 12,
     marginBottom: 12,
-    backgroundColor: '#f3f4f6',
+    backgroundColor: COLORS.bg,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   processingText: {
     marginLeft: 12,
@@ -357,7 +534,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 8,
-    backgroundColor: '#f3f4f6',
+    backgroundColor: COLORS.bgTertiary,
     justifyContent: 'center',
     alignItems: 'center',
   },

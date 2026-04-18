@@ -58,6 +58,7 @@ export default function App() {
     optimizePdf,
     upscalePdf,
     estimateOptimizedPdfSize,
+    applyPageNumbersToAllPDFs,
     pdfVersion,
   } = usePDFManager();
 
@@ -68,6 +69,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState('landing');
   const [addPageModalVisible, setAddPageModalVisible] = useState(false);
   const [selectedPdfForPages, setSelectedPdfForPages] = useState(null);
+  const [pageManagerInitialMode, setPageManagerInitialMode] = useState('ADD_END');
 
   const isMergeMode = activeFeature === 'merge';
   const isSelectionMode = isMergeMode && selectedPDFsState.length > 0 && activeTab === 'pdfs';
@@ -114,6 +116,20 @@ export default function App() {
       subtitle: 'Insert or append blank pages at any position',
       icon: 'plus-box-outline',
       color: '#2d5f3f',
+    },
+    {
+      key: 'numberSingle',
+      title: 'Number PDF',
+      subtitle: 'Pick one PDF and apply text page numbers',
+      icon: 'numeric-1-box-outline',
+      color: '#6b4f2a',
+    },
+    {
+      key: 'numberAll',
+      title: 'Number All PDFs',
+      subtitle: 'One tap to apply text page numbers to every saved PDF',
+      icon: 'numeric',
+      color: '#6b4f2a',
     },
     {
       key: 'optimize',
@@ -197,6 +213,11 @@ export default function App() {
       subtitle: 'Open the page manager to insert or append blank pages.',
       itemType: 'pdf',
     },
+    numberSingle: {
+      title: 'Pick a PDF to number',
+      subtitle: 'Opens page numbering for the selected file only.',
+      itemType: 'pdf',
+    },
     optimize: {
       title: 'Pick a PDF to optimize',
       subtitle: 'Open the viewer and choose Small, Balanced, or Original.',
@@ -246,6 +267,25 @@ export default function App() {
   };
 
   const handleOpenFeature = (featureKey) => {
+    if (featureKey === 'numberAll') {
+      Alert.alert(
+        'Apply Page Numbers to All PDFs',
+        'This will stamp page numbers onto every PDF in your library. Continue?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Apply',
+            onPress: async () => {
+              await applyPageNumbersToAllPDFs();
+              setActiveFeature(null);
+              setViewMode('landing');
+            },
+          },
+        ]
+      );
+      return;
+    }
+
     setActiveFeature(featureKey);
     setSelectedPDFsState([]);
 
@@ -255,7 +295,7 @@ export default function App() {
       return;
     }
 
-    if (featureKey === 'addPage') {
+    if (featureKey === 'addPage' || featureKey === 'numberSingle') {
       setActiveTab('pdfs');
       setViewMode('picker');
       return;
@@ -286,8 +326,11 @@ export default function App() {
       return;
     }
 
-    if (activeFeature === 'addPage') {
+    if (activeFeature === 'addPage' || activeFeature === 'numberSingle') {
       setSelectedPdfForPages(pdfItem);
+      setPageManagerInitialMode(
+        activeFeature === 'numberSingle' ? 'APPLY_NUMBERS' : 'ADD_END'
+      );
       setAddPageModalVisible(true);
       return;
     }
@@ -501,6 +544,7 @@ export default function App() {
       <PDFViewerModal
         visible={viewerModalVisible}
         pdfItem={activePdf}
+        isLoading={viewerLoading}
         onLoadComplete={() => setViewerLoading(false)}
         onClose={closePDFViewer}
         onModify={modifyPdf}
@@ -518,13 +562,16 @@ export default function App() {
         visible={addPageModalVisible}
         pdfPath={selectedPdfForPages?.uri}
         currentPageCount={selectedPdfForPages?.pageCount || 1}
+        initialMode={pageManagerInitialMode}
         onCancel={() => {
           setAddPageModalVisible(false);
           setSelectedPdfForPages(null);
+          setPageManagerInitialMode('ADD_END');
         }}
         onSuccess={(newVersion) => {
           setAddPageModalVisible(false);
           setSelectedPdfForPages(null);
+          setPageManagerInitialMode('ADD_END');
           setViewMode('landing');
           setActiveFeature(null);
           loadSavedPDFs(); // Reload PDFs to reflect changes
