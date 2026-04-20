@@ -403,14 +403,58 @@ export const usePDFManager = () => {
 
   // Pick multiple images from library
   const pickImages = useCallback(async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsMultipleSelection: true,
-      quality: 0.85,
-    });
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          'Permission Required',
+          'Allow photo library access to select images for PDF creation.'
+        );
+        return;
+      }
 
-    if (!result.canceled) {
-      setSelectedImages(result.assets || []);
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions?.Images || ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: 0,
+        quality: 0.85,
+      });
+
+      if (!result.canceled) {
+        setSelectedImages(result.assets || []);
+      }
+    } catch (error) {
+      console.error('Image picker failed:', error);
+
+      const errorMessage = String(error?.message || '');
+      const shouldFallbackToDocumentPicker =
+        errorMessage.includes('unregistered ActivityResultLauncher')
+        || errorMessage.includes('launchImageLibraryAsync')
+        || errorMessage.includes('ExponentImagePicker.launchImageLibraryAsync');
+
+      if (!shouldFallbackToDocumentPicker) {
+        Alert.alert('Image Picker Error', error?.message || 'Failed to open image picker.');
+        return;
+      }
+
+      try {
+        const fallback = await DocumentPicker.getDocumentAsync({
+          type: ['image/*'],
+          multiple: true,
+          copyToCacheDirectory: true,
+        });
+
+        if (!fallback.canceled) {
+          setSelectedImages(fallback.assets || []);
+          Alert.alert('Info', 'Using file picker fallback for image selection.');
+        }
+      } catch (fallbackError) {
+        console.error('Fallback image selection failed:', fallbackError);
+        Alert.alert(
+          'Image Picker Error',
+          fallbackError?.message || 'Failed to open both image and file pickers.'
+        );
+      }
     }
   }, []);
 
