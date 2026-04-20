@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, degrees, rgb, StandardFonts } from 'pdf-lib';
 import { Buffer } from 'buffer';
 
 const A4_WIDTH = 595;
@@ -94,6 +94,85 @@ export const applyPageNumbersToPdfDocument = async (pdfDoc, options = {}) => {
       color: textColor,
     });
   }
+};
+
+/**
+ * Apply a subtle text watermark to each page.
+ * This is used for PDFs created or modified within the app.
+ */
+export const applyWatermark = async (pdfDoc, options = {}) => {
+  if (!pdfDoc || typeof pdfDoc.getPages !== 'function') return;
+
+  const pages = pdfDoc.getPages();
+  if (!pages?.length) return;
+
+  const {
+    text = 'PDF LIBRARY',
+    footerText = 'Created with PDF Library',
+    fontSize,
+    margin = 18,
+    color = rgb(0.12, 0.12, 0.12),
+    footerColor = rgb(0.55, 0.58, 0.66),
+  } = options;
+
+  let font;
+  try {
+    font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  } catch {
+    // If font embedding fails for any reason, skip watermark instead of breaking PDF generation.
+    return;
+  }
+
+  const safeFontSize = Number.isFinite(fontSize) ? clamp(fontSize, 12, 72) : null;
+  const safeMargin = clamp(Number.isFinite(margin) ? margin : 18, 8, 80);
+
+  pages.forEach((page) => {
+    const { width, height } = page.getSize();
+    const watermarkText = String(text || '').trim();
+    const footer = String(footerText || '').trim();
+
+    if (watermarkText) {
+      const autoSize = clamp(Math.min(width, height) * 0.11, 22, 54);
+      const diagonalSize = safeFontSize || autoSize;
+      const textWidth = font.widthOfTextAtSize(watermarkText, diagonalSize);
+
+      // Two-pass draw (light + dark) improves contrast across light and dark images.
+      page.drawText(watermarkText, {
+        x: (width - textWidth) / 2 + 1,
+        y: height * 0.48 + 1,
+        size: diagonalSize,
+        font,
+        color: rgb(1, 1, 1),
+        rotate: degrees(32),
+        opacity: 0.24,
+      });
+
+      page.drawText(watermarkText, {
+        x: (width - textWidth) / 2,
+        y: height * 0.48,
+        size: diagonalSize,
+        font,
+        color,
+        rotate: degrees(32),
+        opacity: 0.2,
+      });
+    }
+
+    if (footer) {
+      const footerSize = clamp((safeFontSize || 16) * 0.55, 9, 16);
+      const footerWidth = font.widthOfTextAtSize(footer, footerSize);
+      const footerX = clamp(width - footerWidth - safeMargin, 0, Math.max(0, width - footerWidth));
+
+      page.drawText(footer, {
+        x: footerX,
+        y: safeMargin,
+        size: footerSize,
+        font,
+        color: footerColor,
+        opacity: 0.9,
+      });
+    }
+  });
 };
 
 /**

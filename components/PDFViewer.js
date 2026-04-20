@@ -14,9 +14,9 @@ import { fallbackOpenWithShare } from '../utils/fallback';
 import { LockPDFModal } from './LockPDFModal';
 import { COLORS } from '../constants/theme';
 import * as FileSystem from 'expo-file-system/legacy';
+import { loadAnnotations, saveAnnotationData } from '../utils/annotationStorage';
 import { PasswordPromptModal } from './pdfViewer/PasswordPromptModal';
 import { OptimizeModal } from './pdfViewer/OptimizeModal';
-import { AndroidPdfEditor } from './AndroidPdfEditor';
 
 /**
  * PDFViewer Component
@@ -63,10 +63,12 @@ export const PDFViewer = ({
   const [isPanMode, setIsPanMode] = useState(false);
   const [isEraserMode, setIsEraserMode] = useState(false);
   const [isTextMode, setIsTextMode] = useState(false);
+  const [isHighlightMode, setIsHighlightMode] = useState(false);
   const [paths, setPaths] = useState([]);
   const [textAnnotations, setTextAnnotations] = useState([]);
   const [history, setHistory] = useState([]);
   const [activeColor, setActiveColor] = useState(DRAW_COLORS[0]);
+  const [highlightColor, setHighlightColor] = useState('#FFD60A');
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [canvasLayout, setCanvasLayout] = useState({ width: 1, height: 1 });
   const [eraserCursor, setEraserCursor] = useState({ visible: false, x: 0, y: 0, radius: 12 });
@@ -79,8 +81,41 @@ export const PDFViewer = ({
   const [selectedOptimizeKey, setSelectedOptimizeKey] = useState('balanced');
   const [minimumSizeMb, setMinimumSizeMb] = useState('');
   const [sizeEstimate, setSizeEstimate] = useState({ beforeSize: 0, estimatedAfterSize: 0 });
+
+  // ── Refs mirroring every piece of tool state ──────────────────────────────
+  // panResponder is created ONCE (empty deps) and reads these refs for fresh values.
+  const isEditModeRef = React.useRef(false);
+  const isPanModeRef = React.useRef(false);
+  const isEraserModeRef = React.useRef(false);
+  const isTextModeRef = React.useRef(false);
+  const isHighlightModeRef = React.useRef(false);
+  const activeColorRef = React.useRef(DRAW_COLORS[0]);
+  const highlightColorRef = React.useRef('#FFD60A');
+  const strokeWidthRef = React.useRef(3);
+  const activePageIndexRef = React.useRef(0);
+  const canvasLayoutRef = React.useRef({ width: 1, height: 1 });
+  const activeTextDraftRef = React.useRef(null);
+
+  // Keep refs in sync with state
+  React.useLayoutEffect(() => { isEditModeRef.current = isEditMode; }, [isEditMode]);
+  React.useLayoutEffect(() => { isPanModeRef.current = isPanMode; }, [isPanMode]);
+  React.useLayoutEffect(() => { isEraserModeRef.current = isEraserMode; }, [isEraserMode]);
+  React.useLayoutEffect(() => { isTextModeRef.current = isTextMode; }, [isTextMode]);
+  React.useLayoutEffect(() => { isHighlightModeRef.current = isHighlightMode; }, [isHighlightMode]);
+  React.useLayoutEffect(() => { activeColorRef.current = activeColor; }, [activeColor]);
+  React.useLayoutEffect(() => { highlightColorRef.current = highlightColor; }, [highlightColor]);
+  React.useLayoutEffect(() => { strokeWidthRef.current = strokeWidth; }, [strokeWidth]);
+  React.useLayoutEffect(() => { activePageIndexRef.current = activePageIndex; }, [activePageIndex]);
+  React.useLayoutEffect(() => { canvasLayoutRef.current = canvasLayout; }, [canvasLayout]);
+  React.useLayoutEffect(() => { activeTextDraftRef.current = activeTextDraft; }, [activeTextDraft]);
+
+  // Gesture layer captures touches when in edit mode but NOT in pan mode
   const shouldCaptureAnnotationGestures = isEditMode && !isPanMode;
-  const isAnnotationCanvasInteractive = shouldCaptureAnnotationGestures;
+  // Lock to single-page only when a drawing tool is active (NOT in pan mode).
+  // In pan mode: native scroll works freely, SVG overlay is hidden to prevent bleed.
+  const isAnnotationCanvasInteractive = isEditMode && !isPanMode;
+  // Derived: which draw tool is active
+  const activeDrawTool = isEraserMode ? 'eraser' : isTextMode ? 'text' : isHighlightMode ? 'highlight' : isPanMode ? 'pan' : 'pen';
 
   const optimizeProfiles = React.useMemo(() => ({
     small: { key: 'small', label: 'Small (Low Quality)', quality: 0.28, scale: 0.5 },
@@ -89,14 +124,16 @@ export const PDFViewer = ({
   }), []);
 
   const selectedOptimizeProfile = optimizeProfiles[selectedOptimizeKey] || optimizeProfiles.balanced;
-  const gestureBlockedBottomHeight = isColorBarOpen ? 300 : 230;
+  // The annotation toolbar is outside viewerArea, so no bottom offset is needed for the gesture layer.
+  const HIGHLIGHT_COLORS = ['#FFD60A', '#34C759', '#FF9F0A', '#FF375F', '#64D2FF'];
+  const PEN_COLORS = ['#FF3B30', '#007AFF', '#34C759', '#FFD60A', '#FF9F0A', '#AF52DE', '#FFFFFF', '#000000'];
   const autoOptimizeOpenedRef = React.useRef(false);
   const autoAnnotateOpenedRef = React.useRef(false);
   const activePathIdRef = React.useRef(null);
   const draggingTextIdRef = React.useRef(null);
   const dragTextOffsetRef = React.useRef({ x: 0, y: 0 });
   const fallbackReportedRef = React.useRef('');
-  const shouldUseAndroidPainter = Platform.OS === 'android' && requestedAction === 'annotate';
+  // Android uses the same NativePdf + SVG-overlay annotation path as other platforms.
 
   const hexToRgb = React.useCallback((hex) => {
     const value = (hex || '').replace('#', '');
@@ -179,94 +216,46 @@ export const PDFViewer = ({
     return Math.hypot(point.x - projX, point.y - projY);
   }, []);
 
-  const erasePathAtPoint = React.useCallback((x, y) => {
-    let removedPathId = null;
-    let removedTextId = null;
+  // ── Stable refs for data (used in debounced saves and panResponder) ────────
+  const pathsRef = React.useRef([]);
+  const textAnnotationsRef = React.useRef([]);
+  const pdfItemUriRef = React.useRef(pdfItem?.uri);
+  const eraseSaveTimerRef = React.useRef(null);
 
-    setTextAnnotations((prev) => {
-      let removed = false;
-      const kept = prev.filter((annotation) => {
-        if (removed || annotation.pageIndex !== activePageIndex) return true;
-        const threshold = Math.max(12, ((annotation.fontSize || 12) * 0.8));
-        if (Math.hypot(x - annotation.x, y - annotation.y) <= threshold) {
-          removed = true;
-          removedTextId = annotation.id;
-          return false;
-        }
-        return true;
-      });
-      return removed ? kept : prev;
-    });
+  React.useEffect(() => { pdfItemUriRef.current = pdfItem?.uri; }, [pdfItem?.uri]);
+  React.useEffect(() => { pathsRef.current = paths; }, [paths]);
+  React.useEffect(() => { textAnnotationsRef.current = textAnnotations; }, [textAnnotations]);
 
-    setPaths((prev) => {
-      const point = { x, y };
-      let removed = false;
-      const kept = prev.filter((path) => {
-        if (removed || path.pageIndex !== activePageIndex || !path.points?.length) return true;
+  // ── distanceToSegment (pure) ──────────────────────────────────────────────
 
-        const threshold = Math.max(12, (path.width || 1) * 3);
-        const points = path.points;
-
-        if (points.length === 1) {
-          if (Math.hypot(point.x - points[0].x, point.y - points[0].y) <= threshold) {
-            removed = true;
-            removedPathId = path.id;
-            return false;
-          }
-          return true;
-        }
-
-        for (let i = 1; i < points.length; i += 1) {
-          const dist = distanceToSegment(point, points[i - 1], points[i]);
-          if (dist <= threshold) {
-            removed = true;
-            removedPathId = path.id;
-            return false;
-          }
-        }
-        return true;
-      });
-
-      return removed ? kept : prev;
-    });
-
-    if (removedPathId || removedTextId) {
-      setHistory((prev) => prev.filter((entry) => entry.id !== removedPathId && entry.id !== removedTextId));
-      if (removedTextId) {
-        setSelectedTextId((prev) => (prev === removedTextId ? null : prev));
-      }
-    }
-  }, [activePageIndex, distanceToSegment]);
-
-  const findTextAtPoint = React.useCallback((x, y) => {
-    const currentPageText = textAnnotations.filter((annotation) => annotation.pageIndex === activePageIndex);
-    for (let i = currentPageText.length - 1; i >= 0; i -= 1) {
-      const annotation = currentPageText[i];
-      const size = annotation.fontSize || 12;
-      const textWidth = Math.max(size, (annotation.text?.length || 1) * size * 0.56);
-      const minX = annotation.x - 10;
-      const maxX = annotation.x + textWidth + 10;
-      const minY = annotation.y - size - 10;
-      const maxY = annotation.y + 10;
-      if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-        return annotation;
-      }
-    }
-    return null;
-  }, [activePageIndex, textAnnotations]);
+  // ── getFittedPageViewport ─────────────────────────────────────────────────
+  const pageDimensionsRef = React.useRef([]);
+  React.useEffect(() => { pageDimensionsRef.current = pageDimensions; }, [pageDimensions]);
 
   const getFittedPageViewport = React.useCallback((pageIndex, fallbackPageSize) => {
+    const pageSize = pageDimensionsRef.current[pageIndex] || fallbackPageSize;
+    const layout = canvasLayoutRef.current;
+    if (!pageSize?.width || !pageSize?.height || !layout.width || !layout.height) {
+      return { x: 0, y: 0, width: layout.width || 1, height: layout.height || 1 };
+    }
+    const scale = Math.min(layout.width / pageSize.width, layout.height / pageSize.height);
+    const width = pageSize.width * scale;
+    const height = pageSize.height * scale;
+    return {
+      x: (layout.width - width) / 2,
+      y: (layout.height - height) / 2,
+      width,
+      height,
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // stable — reads from refs only
+
+  // For save logic we also need a useCallback version that sees pageDimensions state
+  const getFittedPageViewportForSave = React.useCallback((pageIndex, fallbackPageSize) => {
     const pageSize = pageDimensions[pageIndex] || fallbackPageSize;
     if (!pageSize?.width || !pageSize?.height || !canvasLayout.width || !canvasLayout.height) {
-      return {
-        x: 0,
-        y: 0,
-        width: canvasLayout.width || 1,
-        height: canvasLayout.height || 1,
-      };
+      return { x: 0, y: 0, width: canvasLayout.width || 1, height: canvasLayout.height || 1 };
     }
-
-    // Match a contain-style fit used by the native PDF view.
     const scale = Math.min(canvasLayout.width / pageSize.width, canvasLayout.height / pageSize.height);
     const width = pageSize.width * scale;
     const height = pageSize.height * scale;
@@ -279,7 +268,7 @@ export const PDFViewer = ({
   }, [pageDimensions, canvasLayout.width, canvasLayout.height]);
 
   const mapScreenPointToPdf = React.useCallback((point, pageSize, pageIndex) => {
-    const viewport = getFittedPageViewport(pageIndex, pageSize);
+    const viewport = getFittedPageViewportForSave(pageIndex, pageSize);
     const normalizedX = Math.max(0, Math.min(1, (point.x - viewport.x) / viewport.width));
     const normalizedY = Math.max(0, Math.min(1, (point.y - viewport.y) / viewport.height));
     return {
@@ -287,145 +276,213 @@ export const PDFViewer = ({
       y: (1 - normalizedY) * pageSize.height,
       viewport,
     };
-  }, [getFittedPageViewport]);
+  }, [getFittedPageViewportForSave]);
 
+  // ── erasePathAtPoint: works on ALL in-memory paths (new + saved) ──────────
+  // Uses a direct ref-based approach so no stale closure issues.
+  const eraseAtPointImpl = React.useCallback((x, y, currentPageIndex) => {
+    let textRemoved = false;
+    let pathRemoved = false;
+
+    setPaths((prev) => {
+      const point = { x, y };
+      const next = prev.filter((path) => {
+        if (pathRemoved) return true; // only erase one stroke per call for responsiveness
+        if (path.pageIndex !== currentPageIndex || !path.points?.length) return true;
+        const threshold = Math.max(16, (path.width || 1) * 4);
+        const pts = path.points;
+        if (pts.length === 1) {
+          if (Math.hypot(point.x - pts[0].x, point.y - pts[0].y) <= threshold) {
+            pathRemoved = true;
+            return false;
+          }
+          return true;
+        }
+        for (let i = 1; i < pts.length; i += 1) {
+          const dx = pts[i].x - pts[i - 1].x;
+          const dy = pts[i].y - pts[i - 1].y;
+          let dist;
+          if (dx === 0 && dy === 0) {
+            dist = Math.hypot(point.x - pts[i - 1].x, point.y - pts[i - 1].y);
+          } else {
+            const t = Math.max(0, Math.min(1, ((point.x - pts[i - 1].x) * dx + (point.y - pts[i - 1].y) * dy) / (dx * dx + dy * dy)));
+            dist = Math.hypot(point.x - (pts[i - 1].x + t * dx), point.y - (pts[i - 1].y + t * dy));
+          }
+          if (dist <= threshold) {
+            pathRemoved = true;
+            return false;
+          }
+        }
+        return true;
+      });
+      if (pathRemoved) {
+        pathsRef.current = next;
+        return next;
+      }
+      return prev;
+    });
+
+    setTextAnnotations((prev) => {
+      if (textRemoved || pathRemoved) return prev; // already removed something
+      const next = prev.filter((ann) => {
+        if (textRemoved) return true;
+        if (ann.pageIndex !== currentPageIndex) return true;
+        const threshold = Math.max(16, ((ann.fontSize || 12) * 1.0));
+        if (Math.hypot(x - ann.x, y - ann.y) <= threshold) {
+          textRemoved = true;
+          return false;
+        }
+        return true;
+      });
+      if (textRemoved) {
+        textAnnotationsRef.current = next;
+        return next;
+      }
+      return prev;
+    });
+
+    if (pathRemoved || textRemoved) {
+      // Debounce sidecar save
+      if (eraseSaveTimerRef.current) clearTimeout(eraseSaveTimerRef.current);
+      eraseSaveTimerRef.current = setTimeout(() => {
+        const uri = pdfItemUriRef.current;
+        if (uri) {
+          saveAnnotationData(uri, pathsRef.current, textAnnotationsRef.current).catch(() => {});
+        }
+      }, 800);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // stable — uses only refs and setters
+
+  const findTextAtPoint = React.useCallback((x, y) => {
+    const currentPageText = textAnnotationsRef.current.filter((a) => a.pageIndex === activePageIndexRef.current);
+    for (let i = currentPageText.length - 1; i >= 0; i -= 1) {
+      const ann = currentPageText[i];
+      const size = ann.fontSize || 12;
+      const textWidth = Math.max(size, (ann.text?.length || 1) * size * 0.56);
+      if (
+        x >= ann.x - 10 && x <= ann.x + textWidth + 10
+        && y >= ann.y - size - 10 && y <= ann.y + 10
+      ) return ann;
+    }
+    return null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // stable — reads refs only
+
+  // ── PanResponder: created ONCE, reads all state from refs ─────────────────
   const panResponder = React.useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: (event) => {
-      if (!shouldCaptureAnnotationGestures || activeTextDraft) return false;
-      return true;
+    onStartShouldSetPanResponder: () => {
+      // Capture if in edit mode and NOT in pan mode
+      return isEditModeRef.current && !isPanModeRef.current && !activeTextDraftRef.current;
     },
-    onMoveShouldSetPanResponder: (event) => {
-      if (!shouldCaptureAnnotationGestures || activeTextDraft) return false;
-      return true;
+    onMoveShouldSetPanResponder: () => {
+      return isEditModeRef.current && !isPanModeRef.current && !activeTextDraftRef.current;
     },
     onPanResponderGrant: (event) => {
-      if (!shouldCaptureAnnotationGestures) return;
+      if (!isEditModeRef.current || isPanModeRef.current) return;
       const { locationX, locationY } = event.nativeEvent;
-      const viewport = getFittedPageViewport(activePageIndex);
-      const safeViewport = viewport || {
-        x: 0,
-        y: 0,
-        width: canvasLayout.width || 1,
-        height: canvasLayout.height || 1,
-      };
-      const isInsideActiveViewport = (
-        locationX >= safeViewport.x
-        && locationX <= safeViewport.x + safeViewport.width
-        && locationY >= safeViewport.y
-        && locationY <= safeViewport.y + safeViewport.height
-      );
-      if (!isInsideActiveViewport) return;
+      const pageIdx = activePageIndexRef.current;
+      const layout = canvasLayoutRef.current;
 
-      if (isEraserMode) {
-        setEraserCursor({ visible: true, x: locationX, y: locationY, radius: Math.max(12, strokeWidth * 3) });
-        erasePathAtPoint(locationX, locationY);
+      const viewport = getFittedPageViewport(pageIdx);
+      const vp = viewport || { x: 0, y: 0, width: layout.width || 1, height: layout.height || 1 };
+
+      const inside = locationX >= vp.x && locationX <= vp.x + vp.width
+        && locationY >= vp.y && locationY <= vp.y + vp.height;
+      if (!inside) return;
+
+      if (isEraserModeRef.current) {
+        setEraserCursor({ visible: true, x: locationX, y: locationY, radius: Math.max(16, strokeWidthRef.current * 4) });
+        eraseAtPointImpl(locationX, locationY, pageIdx);
         return;
       }
-      if (isTextMode) {
-        if (activeTextDraft) return;
 
+      if (isTextModeRef.current) {
+        if (activeTextDraftRef.current) return;
         const touchedText = findTextAtPoint(locationX, locationY);
         if (touchedText) {
           setSelectedTextId(touchedText.id);
           draggingTextIdRef.current = touchedText.id;
-          dragTextOffsetRef.current = {
-            x: locationX - touchedText.x,
-            y: locationY - touchedText.y,
-          };
+          dragTextOffsetRef.current = { x: locationX - touchedText.x, y: locationY - touchedText.y };
           return;
         }
-
         setSelectedTextId(null);
-        setActiveTextDraft({
-          x: locationX,
-          y: locationY,
-          pageIndex: activePageIndex,
-          text: '',
-        });
+        setActiveTextDraft({ x: locationX, y: locationY, pageIndex: pageIdx, text: '' });
         return;
       }
+
+      // Pen or highlighter
       const pathId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       activePathIdRef.current = pathId;
-      setPaths((prev) => ([
+      const isHL = isHighlightModeRef.current;
+      const col = isHL ? highlightColorRef.current : activeColorRef.current;
+      const sw = strokeWidthRef.current;
+      setPaths((prev) => [
         ...prev,
         {
           id: pathId,
-          pageIndex: activePageIndex,
-          color: activeColor,
-          width: strokeWidth,
+          pageIndex: pageIdx,
+          color: col,
+          width: isHL ? Math.max(16, sw * 4) : sw,
+          opacity: isHL ? 0.38 : 1,
+          isHighlight: isHL,
           points: [{ x: locationX, y: locationY }],
         },
-      ]));
+      ]);
       setHistory((prev) => [...prev, { type: 'path', id: pathId }]);
     },
     onPanResponderMove: (event) => {
-      if (!shouldCaptureAnnotationGestures) return;
+      if (!isEditModeRef.current || isPanModeRef.current) return;
       const { locationX, locationY } = event.nativeEvent;
-      const viewport = getFittedPageViewport(activePageIndex);
-      const safeViewport = viewport || {
-        x: 0,
-        y: 0,
-        width: canvasLayout.width || 1,
-        height: canvasLayout.height || 1,
-      };
-      const isInsideActiveViewport = (
-        locationX >= safeViewport.x
-        && locationX <= safeViewport.x + safeViewport.width
-        && locationY >= safeViewport.y
-        && locationY <= safeViewport.y + safeViewport.height
-      );
+      const pageIdx = activePageIndexRef.current;
+      const layout = canvasLayoutRef.current;
+      const viewport = getFittedPageViewport(pageIdx);
+      const vp = viewport || { x: 0, y: 0, width: layout.width || 1, height: layout.height || 1 };
+      const inside = locationX >= vp.x && locationX <= vp.x + vp.width
+        && locationY >= vp.y && locationY <= vp.y + vp.height;
 
-      if (isEraserMode) {
-        if (!isInsideActiveViewport) return;
-        setEraserCursor({ visible: true, x: locationX, y: locationY, radius: Math.max(12, strokeWidth * 3) });
-        erasePathAtPoint(locationX, locationY);
+      if (isEraserModeRef.current) {
+        if (!inside) return;
+        setEraserCursor({ visible: true, x: locationX, y: locationY, radius: Math.max(16, strokeWidthRef.current * 4) });
+        eraseAtPointImpl(locationX, locationY, pageIdx);
         return;
       }
 
-      if (isTextMode) {
+      if (isTextModeRef.current) {
         const dragId = draggingTextIdRef.current;
         if (!dragId) return;
-
         const nextX = locationX - dragTextOffsetRef.current.x;
         const nextY = locationY - dragTextOffsetRef.current.y;
-
-        setTextAnnotations((prev) => prev.map((annotation) => {
-          if (annotation.id !== dragId) return annotation;
+        setTextAnnotations((prev) => prev.map((ann) => {
+          if (ann.id !== dragId) return ann;
           return {
-            ...annotation,
-            x: Math.max(safeViewport.x + 4, Math.min(safeViewport.x + safeViewport.width - 4, nextX)),
-            y: Math.max(safeViewport.y + 12, Math.min(safeViewport.y + safeViewport.height - 4, nextY)),
+            ...ann,
+            x: Math.max(vp.x + 4, Math.min(vp.x + vp.width - 4, nextX)),
+            y: Math.max(vp.y + 12, Math.min(vp.y + vp.height - 4, nextY)),
           };
         }));
         return;
       }
 
-      if (!isInsideActiveViewport) return;
-
-      if (!activePathIdRef.current) return;
-      const point = { x: locationX, y: locationY };
-      const activePathId = activePathIdRef.current;
-
+      if (!inside || !activePathIdRef.current) return;
+      const pid = activePathIdRef.current;
       setPaths((prev) => prev.map((path) => {
-        if (path.id !== activePathId) return path;
-        return { ...path, points: [...path.points, point] };
+        if (path.id !== pid) return path;
+        return { ...path, points: [...path.points, { x: locationX, y: locationY }] };
       }));
     },
     onPanResponderRelease: () => {
       activePathIdRef.current = null;
       draggingTextIdRef.current = null;
-      if (isEraserMode) {
-        setEraserCursor((prev) => ({ ...prev, visible: false }));
-      }
+      setEraserCursor((prev) => ({ ...prev, visible: false }));
     },
     onPanResponderTerminate: () => {
       activePathIdRef.current = null;
       draggingTextIdRef.current = null;
-      if (isEraserMode) {
-        setEraserCursor((prev) => ({ ...prev, visible: false }));
-      }
+      setEraserCursor((prev) => ({ ...prev, visible: false }));
     },
-  }), [shouldCaptureAnnotationGestures, isEraserMode, isTextMode, activePageIndex, activeColor, strokeWidth, erasePathAtPoint, activeTextDraft, findTextAtPoint, getFittedPageViewport, canvasLayout.width, canvasLayout.height]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []); // STABLE — all logic reads from refs
 
   const pagePaths = React.useMemo(
     () => paths.filter((path) => path.pageIndex === activePageIndex),
@@ -441,8 +498,18 @@ export const PDFViewer = ({
     setIsPanMode(false);
     setIsEraserMode(false);
     setIsTextMode(false);
+    setIsHighlightMode(false);
     setActiveTextDraft(null);
     setIsColorBarOpen(false);
+    setSelectedTextId(null);
+  };
+
+  const selectTool = (tool) => {
+    setIsEraserMode(tool === 'eraser');
+    setIsTextMode(tool === 'text');
+    setIsHighlightMode(tool === 'highlight');
+    setIsPanMode(tool === 'pan');
+    setActiveTextDraft(null);
     setSelectedTextId(null);
   };
 
@@ -491,6 +558,10 @@ export const PDFViewer = ({
     setTextAnnotations([]);
     setHistory([]);
     setSelectedTextId(null);
+    // Also clear the sidecar so cleared annotations don't reload next session
+    if (pdfItem?.uri) {
+      saveAnnotationData(pdfItem.uri, [], []).catch(() => {});
+    }
   };
 
   const commitTextDraft = () => {
@@ -518,10 +589,15 @@ export const PDFViewer = ({
     setActiveTextDraft(null);
   };
 
+  /**
+   * saveAnnotations — writes to SIDECAR ONLY.
+   * Does NOT bake into the PDF. Strokes stay fully erasable.
+   * Call exportAnnotationsToPdf() to bake permanently.
+   */
   const saveAnnotations = async ({ skipEmptyAlert = false } = {}) => {
     if (isSavingAnnotations) return;
 
-    const drawablePaths = paths.filter((path) => path.points?.length);
+    // Commit any active text draft
     const draftText = activeTextDraft?.text?.trim()
       ? {
           id: `draft_${Date.now()}`,
@@ -533,25 +609,60 @@ export const PDFViewer = ({
           fontSize: Math.max(10, strokeWidth * 3),
         }
       : null;
-    const drawableTexts = [
-      ...textAnnotations.filter((annotation) => annotation.text?.trim()),
+
+    const allPaths = paths.filter((p) => p.points?.length);
+    const allTexts = [
+      ...textAnnotations.filter((a) => a.text?.trim()),
       ...(draftText ? [draftText] : []),
     ];
-    if (!drawablePaths.length && !drawableTexts.length) {
-      if (!skipEmptyAlert) {
-        Alert.alert('No Annotations', 'Add drawings or text on the PDF before saving.');
-      }
+
+    if (!allPaths.length && !allTexts.length) {
+      if (!skipEmptyAlert) Alert.alert('No Annotations', 'Add drawings or text before saving.');
       return 'empty';
     }
 
     if (!pdfItem?.uri) {
-      Alert.alert('Save Error', 'No PDF selected to annotate.');
+      Alert.alert('Save Error', 'No PDF selected.');
       return 'error';
     }
 
-    if (!canvasLayout.width || !canvasLayout.height) {
-      Alert.alert('Save Error', 'Canvas dimensions are not ready yet. Try again.');
+    setIsSavingAnnotations(true);
+    try {
+      await saveAnnotationData(pdfItem.uri, allPaths, allTexts);
+      if (draftText) {
+        setTextAnnotations((prev) => [...prev, draftText]);
+        setActiveTextDraft(null);
+      }
+      if (!skipEmptyAlert) {
+        Alert.alert('Saved', 'Annotations saved. Use "Export to PDF" to bake them permanently into the file.');
+      }
+      return 'saved';
+    } catch (err) {
+      Alert.alert('Save Error', err?.message || 'Failed to save annotations.');
       return 'error';
+    } finally {
+      setIsSavingAnnotations(false);
+    }
+  };
+
+  /**
+   * exportAnnotationsToPdf — bakes all current sidecar strokes into the PDF permanently.
+   * After export, the sidecar is cleared (strokes are now part of the PDF pixels).
+   */
+  const exportAnnotationsToPdf = async () => {
+    if (isSavingAnnotations) return;
+
+    const allPaths = pathsRef.current.filter((p) => p.points?.length);
+    const allTexts = textAnnotationsRef.current.filter((a) => a.text?.trim());
+
+    if (!allPaths.length && !allTexts.length) {
+      Alert.alert('No Annotations', 'Nothing to export.');
+      return;
+    }
+
+    if (!pdfItem?.uri || !canvasLayout.width || !canvasLayout.height) {
+      Alert.alert('Export Error', 'Not ready. Try again.');
+      return;
     }
 
     setIsSavingAnnotations(true);
@@ -559,122 +670,78 @@ export const PDFViewer = ({
       const sourceUri = ensureFileUri(pdfItem.uri);
       let sourceBase64;
       try {
-        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
       } catch {
-        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri.replace('file://', ''), {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        sourceBase64 = await FileSystem.readAsStringAsync(sourceUri.replace('file://', ''), { encoding: FileSystem.EncodingType.Base64 });
       }
 
       const pdfDoc = await PDFDocument.load(Buffer.from(sourceBase64, 'base64'));
       const pages = pdfDoc.getPages();
       const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-      drawablePaths.forEach((path) => {
+      allPaths.forEach((path) => {
         const page = pages[path.pageIndex];
         if (!page || path.points.length < 1) return;
-
         const { width: pageWidth, height: pageHeight } = page.getSize();
         const pageSize = { width: pageWidth, height: pageHeight };
-        const viewport = getFittedPageViewport(path.pageIndex, pageSize);
+        const viewport = getFittedPageViewportForSave(path.pageIndex, pageSize);
         const color = hexToRgb(path.color);
         const scaleX = pageWidth / viewport.width;
         const scaleY = pageHeight / viewport.height;
         const mappedThickness = Math.max(0.5, path.width * ((scaleX + scaleY) / 2));
-
+        const pathOpacity = path.opacity !== undefined ? path.opacity : 1;
         if (path.points.length === 1) {
-          const point = mapScreenPointToPdf(path.points[0], pageSize, path.pageIndex);
-          page.drawCircle({
-            x: point.x,
-            y: point.y,
-            size: Math.max(0.75, mappedThickness * 0.5),
-            color: rgb(color.r, color.g, color.b),
-          });
+          const pt = mapScreenPointToPdf(path.points[0], pageSize, path.pageIndex);
+          page.drawCircle({ x: pt.x, y: pt.y, size: Math.max(0.75, mappedThickness * 0.5), color: rgb(color.r, color.g, color.b), opacity: pathOpacity });
           return;
         }
-
         for (let i = 1; i < path.points.length; i += 1) {
-          const previous = path.points[i - 1];
-          const current = path.points[i];
-          const start = mapScreenPointToPdf(previous, pageSize, path.pageIndex);
-          const end = mapScreenPointToPdf(current, pageSize, path.pageIndex);
-
-          page.drawLine({
-            start,
-            end,
-            thickness: mappedThickness,
-            color: rgb(color.r, color.g, color.b),
-          });
+          const start = mapScreenPointToPdf(path.points[i - 1], pageSize, path.pageIndex);
+          const end = mapScreenPointToPdf(path.points[i], pageSize, path.pageIndex);
+          page.drawLine({ start, end, thickness: mappedThickness, color: rgb(color.r, color.g, color.b), opacity: pathOpacity });
         }
       });
 
-      drawableTexts.forEach((annotation) => {
-        const page = pages[annotation.pageIndex];
-        if (!page || !annotation.text) return;
-
+      allTexts.forEach((ann) => {
+        const page = pages[ann.pageIndex];
+        if (!page || !ann.text) return;
         const { width: pageWidth, height: pageHeight } = page.getSize();
         const pageSize = { width: pageWidth, height: pageHeight };
-        const { x: mappedX, y: mappedY, viewport } = mapScreenPointToPdf(
-          { x: annotation.x, y: annotation.y },
-          pageSize,
-          annotation.pageIndex
-        );
-        const color = hexToRgb(annotation.color);
+        const { x: mx, y: my, viewport } = mapScreenPointToPdf({ x: ann.x, y: ann.y }, pageSize, ann.pageIndex);
+        const color = hexToRgb(ann.color);
         const scaleX = pageWidth / viewport.width;
         const scaleY = pageHeight / viewport.height;
-        const mappedSize = Math.max(8, annotation.fontSize * ((scaleX + scaleY) / 2));
-        // SVG text y is baseline-like while pdf-lib y uses text bottom; adjust for closer visual match.
-        const baselineAdjustment = mappedSize * 0.2;
-
-        page.drawText(annotation.text, {
-          x: mappedX,
-          y: Math.max(0, mappedY - baselineAdjustment),
-          size: mappedSize,
-          font: helvetica,
-          color: rgb(color.r, color.g, color.b),
-        });
+        const mappedSize = Math.max(8, ann.fontSize * ((scaleX + scaleY) / 2));
+        page.drawText(ann.text, { x: mx, y: Math.max(0, my - mappedSize * 0.2), size: mappedSize, font: helvetica, color: rgb(color.r, color.g, color.b) });
       });
 
       const outputUri = ensureFileUri(pdfItem.uri);
       const bytes = await pdfDoc.save();
-
       const updatedBase64 = Buffer.from(bytes).toString('base64');
       try {
-        await FileSystem.writeAsStringAsync(outputUri, updatedBase64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        await FileSystem.writeAsStringAsync(outputUri, updatedBase64, { encoding: FileSystem.EncodingType.Base64 });
       } catch {
-        await FileSystem.writeAsStringAsync(outputUri.replace('file://', ''), updatedBase64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        await FileSystem.writeAsStringAsync(outputUri.replace('file://', ''), updatedBase64, { encoding: FileSystem.EncodingType.Base64 });
       }
 
-      // Refresh native renderer from a fresh cache path so edits are visible immediately.
-      const cacheTarget = `${FileSystem.cacheDirectory}viewer_annotated_${Date.now()}_${pdfItem.name || 'document.pdf'}`;
+      // Refresh viewer
+      const cacheTarget = `${FileSystem.cacheDirectory}viewer_exported_${Date.now()}_${pdfItem.name || 'document.pdf'}`;
       try {
-        await FileSystem.copyAsync({
-          from: outputUri,
-          to: cacheTarget,
-        });
+        await FileSystem.copyAsync({ from: outputUri, to: cacheTarget });
       } catch {
-        await FileSystem.copyAsync({
-          from: outputUri.replace('file://', ''),
-          to: cacheTarget,
-        });
+        await FileSystem.copyAsync({ from: outputUri.replace('file://', ''), to: cacheTarget });
       }
 
+      // Clear sidecar — strokes are now baked and no longer erasable
+      await saveAnnotationData(pdfItem.uri, [], []);
       setPaths([]);
       setTextAnnotations([]);
       setHistory([]);
-      closeAnnotationMode();
+      setActiveTextDraft(null);
       setViewerUri(withVersionQuery(cacheTarget));
-      Alert.alert('Saved', 'Your annotations were permanently written to this PDF.');
-      return 'saved';
-    } catch (error) {
-      Alert.alert('Save Error', error?.message || 'Failed to save annotations.');
-      return 'error';
+      Alert.alert('Exported', 'Annotations permanently written to PDF. Note: baked strokes can no longer be erased.');
+    } catch (err) {
+      Alert.alert('Export Error', err?.message || 'Failed to export.');
     } finally {
       setIsSavingAnnotations(false);
     }
@@ -900,6 +967,7 @@ export const PDFViewer = ({
   }, [showOptimizeModal, selectedOptimizeProfile, refreshSizeEstimate]);
 
   React.useEffect(() => {
+    let isMounted = true;
     setViewerPassword('');
     setPasswordInput('');
     setShowPasswordPrompt(false);
@@ -907,6 +975,7 @@ export const PDFViewer = ({
     setIsPanMode(false);
     setIsEraserMode(false);
     setIsTextMode(false);
+    setIsHighlightMode(false);
     setActiveTextDraft(null);
     setIsColorBarOpen(false);
     setPaths([]);
@@ -914,6 +983,16 @@ export const PDFViewer = ({
     setHistory([]);
     setSelectedTextId(null);
     setViewerUri(withVersionQuery(pdfItem?.uri));
+
+    // Load persisted sidecar annotations for the new PDF
+    if (pdfItem?.uri) {
+      loadAnnotations(pdfItem.uri).then((data) => {
+        if (!isMounted || !data) return;
+        if (data.paths?.length) setPaths(data.paths);
+        if (data.textAnnotations?.length) setTextAnnotations(data.textAnnotations);
+      }).catch(() => {});
+    }
+    return () => { isMounted = false; };
   }, [pdfItem?.uri, withVersionQuery]);
 
   React.useEffect(() => {
@@ -929,67 +1008,42 @@ export const PDFViewer = ({
   }, [pdfItem?.uri, requestedAction]);
 
   React.useEffect(() => {
+    // Only auto-enter annotation mode once per (pdf + action) combination
     if (requestedAction === 'annotate' && !autoAnnotateOpenedRef.current) {
       autoAnnotateOpenedRef.current = true;
       setIsEditMode(true);
-      setIsPanMode(true);
+      setIsPanMode(true); // Start in pan mode so user can scroll first, then pick a tool
       setIsEraserMode(false);
       setIsTextMode(false);
+      setIsHighlightMode(false);
       setIsColorBarOpen(false);
+    }
+  }, [requestedAction]); // intentionally omit pdfItem?.uri so this only re-runs on action change
+
+  React.useEffect(() => {
+    // Reset the gate only when requestedAction changes away from 'annotate',
+    // NOT on every pdfItem change (that caused double-firing).
+    if (requestedAction !== 'annotate') {
+      autoAnnotateOpenedRef.current = false;
     }
   }, [requestedAction]);
 
   React.useEffect(() => {
-    if (requestedAction !== 'annotate') {
-      autoAnnotateOpenedRef.current = false;
-    }
-  }, [requestedAction, pdfItem?.uri]);
-
-  React.useEffect(() => {
     const key = `${pdfItem?.uri || ''}|${requestedAction || ''}`;
-    const usingAndroidPainter = shouldUseAndroidPainter && !isExpoGo && viewerUri;
 
     if (fallbackReportedRef.current === key) return;
 
-    if (pdfItem?.uri && !usingAndroidPainter && (!NativePdf || !viewerUri)) {
+    if (pdfItem?.uri && (!NativePdf || !viewerUri)) {
       fallbackReportedRef.current = key;
       onLoadComplete?.(0);
     }
-  }, [pdfItem?.uri, requestedAction, shouldUseAndroidPainter, viewerUri, onLoadComplete]);
+  }, [pdfItem?.uri, requestedAction, viewerUri, onLoadComplete]);
 
   if (!pdfItem?.uri) {
     return (
       <View style={styles.errorContainer}>
         <Text style={styles.errorText}>Invalid PDF item</Text>
       </View>
-    );
-  }
-
-  if (shouldUseAndroidPainter && !isExpoGo && viewerUri) {
-    return (
-      <AndroidPdfEditor
-        pdfUri={viewerUri}
-        pdfPassword={viewerPassword}
-        initialEditing
-        onLoadComplete={(numberOfPages) => {
-          const safePageCount = numberOfPages || 0;
-          setPageCount(safePageCount);
-          onLoadComplete?.(safePageCount);
-        }}
-        onPageChanged={(page, numberOfPages) => {
-          const safeIndex = Math.max(0, Math.min((numberOfPages || pageCount) - 1, (page || 1) - 1));
-          setActivePageIndex(safeIndex);
-        }}
-        onError={() => {
-          onLoadComplete?.(0);
-        }}
-        onAnnotationsExported={(annotationPath) => {
-          Alert.alert(
-            'Annotations Saved',
-            `Saved to ${annotationPath}. Reopening this PDF in annotate mode loads the same drawing file automatically.`
-          );
-        }}
-      />
     );
   }
 
@@ -1048,8 +1102,8 @@ export const PDFViewer = ({
           />
 
           <View
-            style={styles.svgOverlay}
-            pointerEvents={isEditMode ? 'box-none' : 'none'}
+            style={[styles.svgOverlay, isPanMode && { opacity: 0 }]}
+            pointerEvents={isEditMode && !isPanMode ? 'box-none' : 'none'}
           >
             <Svg width="100%" height="100%" pointerEvents="none">
               {pagePaths.map((path) => (
@@ -1058,9 +1112,10 @@ export const PDFViewer = ({
                   d={buildPathData(path.points)}
                   stroke={path.color}
                   strokeWidth={path.width}
+                  strokeOpacity={path.opacity || 1}
                   fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+                  strokeLinecap={path.isHighlight ? 'square' : 'round'}
+                  strokeLinejoin={path.isHighlight ? 'miter' : 'round'}
                 />
               ))}
               {textAnnotations
@@ -1101,12 +1156,201 @@ export const PDFViewer = ({
             </Svg>
 
             <View
-              style={[styles.canvasGestureLayer, { bottom: gestureBlockedBottomHeight }]}
+              style={styles.canvasGestureLayer}
               pointerEvents={shouldCaptureAnnotationGestures ? 'auto' : 'none'}
               {...panResponder.panHandlers}
             />
           </View>
         </View>
+
+        {/* ── ANNOTATION TOOLBAR ───────────────────────────── */}
+        {isEditMode && (
+          <View style={styles.annotationToolbar}>
+            {/* Row 1: Tool buttons */}
+            <View style={styles.atbRow}>
+              {/* Pen */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activeDrawTool === 'pen' && styles.atbBtnActive]}
+                onPress={() => selectTool('pen')}
+              >
+                <MaterialCommunityIcons name="pencil" size={22} color={activeDrawTool === 'pen' ? COLORS.primary : '#ccc'} />
+              </TouchableOpacity>
+
+              {/* Highlighter */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activeDrawTool === 'highlight' && styles.atbBtnActive]}
+                onPress={() => selectTool('highlight')}
+              >
+                <MaterialCommunityIcons name="marker" size={22} color={activeDrawTool === 'highlight' ? '#FFD60A' : '#ccc'} />
+              </TouchableOpacity>
+
+              {/* Eraser */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activeDrawTool === 'eraser' && styles.atbBtnActive]}
+                onPress={() => selectTool('eraser')}
+              >
+                <MaterialCommunityIcons name="eraser" size={22} color={activeDrawTool === 'eraser' ? '#FF3B30' : '#ccc'} />
+              </TouchableOpacity>
+
+              {/* Text */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activeDrawTool === 'text' && styles.atbBtnActive]}
+                onPress={() => selectTool('text')}
+              >
+                <MaterialCommunityIcons name="format-text" size={22} color={activeDrawTool === 'text' ? COLORS.primary : '#ccc'} />
+              </TouchableOpacity>
+
+              {/* Pan / No-Draw mode — touch without drawing; use < > buttons to navigate pages */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activeDrawTool === 'pan' && styles.atbBtnActive]}
+                onPress={() => selectTool('pan')}
+              >
+                <MaterialCommunityIcons name="hand-back-right" size={22} color={activeDrawTool === 'pan' ? COLORS.primary : '#ccc'} />
+              </TouchableOpacity>
+
+              <View style={styles.atbDivider} />
+
+              {/* Undo */}
+              <TouchableOpacity
+                style={[styles.atbBtn, !history.length && styles.atbBtnDisabled]}
+                onPress={handleUndoLastPath}
+                disabled={!history.length}
+              >
+                <MaterialCommunityIcons name="undo" size={22} color={history.length ? '#ccc' : '#555'} />
+              </TouchableOpacity>
+
+              {/* Clear */}
+              <TouchableOpacity
+                style={[styles.atbBtn, !(paths.length || textAnnotations.length) && styles.atbBtnDisabled]}
+                onPress={() => {
+                  Alert.alert('Clear All', 'Remove all annotations on this page?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Clear', style: 'destructive', onPress: handleClearPaths },
+                  ]);
+                }}
+                disabled={!(paths.length || textAnnotations.length)}
+              >
+                <MaterialCommunityIcons name="delete-sweep" size={22} color={paths.length || textAnnotations.length ? '#FF3B30' : '#555'} />
+              </TouchableOpacity>
+
+              <View style={styles.atbDivider} />
+
+              {/* Page prev */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activePageIndex === 0 && styles.atbBtnDisabled]}
+                onPress={() => goToPage(-1)}
+                disabled={activePageIndex === 0}
+              >
+                <MaterialCommunityIcons name="chevron-left" size={22} color={activePageIndex === 0 ? '#555' : '#ccc'} />
+              </TouchableOpacity>
+
+              <Text style={styles.atbPageLabel}>{activePageIndex + 1}/{pageCount}</Text>
+
+              {/* Page next */}
+              <TouchableOpacity
+                style={[styles.atbBtn, activePageIndex >= pageCount - 1 && styles.atbBtnDisabled]}
+                onPress={() => goToPage(1)}
+                disabled={activePageIndex >= pageCount - 1}
+              >
+                <MaterialCommunityIcons name="chevron-right" size={22} color={activePageIndex >= pageCount - 1 ? '#555' : '#ccc'} />
+              </TouchableOpacity>
+
+              <View style={styles.atbDivider} />
+
+              {/* Save to sidecar (keeps strokes erasable) */}
+              <TouchableOpacity
+                style={[styles.atbSaveBtn, isSavingAnnotations && styles.atbBtnDisabled]}
+                onPress={() => saveAnnotations()}
+                disabled={isSavingAnnotations}
+              >
+                {isSavingAnnotations ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <MaterialCommunityIcons name="content-save" size={20} color="#fff" />
+                )}
+              </TouchableOpacity>
+
+              {/* Export: bake strokes permanently into PDF */}
+              <TouchableOpacity
+                style={[styles.atbExportBtn, isSavingAnnotations && styles.atbBtnDisabled]}
+                onPress={() => {
+                  Alert.alert(
+                    'Export to PDF',
+                    'This permanently bakes your annotations into the PDF. Baked strokes cannot be erased. Proceed?',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Export', onPress: exportAnnotationsToPdf },
+                    ]
+                  );
+                }}
+                disabled={isSavingAnnotations}
+              >
+                <MaterialCommunityIcons name="file-export" size={20} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Close annotation mode */}
+              <TouchableOpacity
+                style={styles.atbCloseBtn}
+                onPress={() => {
+                  if (paths.length || textAnnotations.length) {
+                    Alert.alert('Exit Annotations?', 'Save your work before exiting?', [
+                      { text: 'Save & Exit', onPress: async () => { await saveAnnotations({ skipEmptyAlert: true }); closeAnnotationMode(); } },
+                      { text: 'Exit without Saving', style: 'destructive', onPress: closeAnnotationMode },
+                      { text: 'Stay', style: 'cancel' },
+                    ]);
+                  } else {
+                    closeAnnotationMode();
+                  }
+                }}
+              >
+                <MaterialCommunityIcons name="close" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Row 2: Color swatches + stroke size */}
+            <View style={styles.atbRow}>
+              {(activeDrawTool === 'highlight' ? HIGHLIGHT_COLORS : PEN_COLORS).map((c) => {
+                const isCurrent = activeDrawTool === 'highlight' ? highlightColor === c : activeColor === c;
+                return (
+                  <TouchableOpacity
+                    key={c}
+                    style={[
+                      styles.colorSwatch,
+                      { backgroundColor: c, borderColor: isCurrent ? '#fff' : 'transparent' },
+                    ]}
+                    onPress={() => {
+                      if (activeDrawTool === 'highlight') {
+                        setHighlightColor(c);
+                      } else {
+                        setActiveColor(c);
+                      }
+                    }}
+                  />
+                );
+              })}
+
+              <View style={styles.atbDivider} />
+
+              {/* Stroke size */}
+              {[1, 3, 6, 10].map((size) => (
+                <TouchableOpacity
+                  key={size}
+                  style={[styles.strokeDot, strokeWidth === size && styles.strokeDotActive]}
+                  onPress={() => setStrokeWidth(size)}
+                >
+                  <View
+                    style={{
+                      width: Math.max(4, size * 2),
+                      height: Math.max(4, size * 2),
+                      borderRadius: size * 2,
+                      backgroundColor: strokeWidth === size ? (activeDrawTool === 'highlight' ? '#FFD60A' : COLORS.primary) : '#888',
+                    }}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
 
         {isEditMode && isTextMode && activeTextDraft && activeTextDraft.pageIndex === activePageIndex && (
           <View
@@ -1155,89 +1399,105 @@ export const PDFViewer = ({
           onApply={applyOptimization}
         />
 
-        {/* Floating Action Menu (FAB) */}
-        <View style={styles.fabContainer}>
-          <LockPDFModal
-            visible={showLockModal}
-            fileName={pdfItem?.name}
-            onCancel={() => {
-              if (!isLocking) setShowLockModal(false);
-            }}
-            onConfirm={handleLockPdf}
-            isLoading={isLocking}
-          />
+        {/* Floating Action Menu (FAB) – hidden when annotation toolbar is showing */}
+        {!isEditMode && (
+          <View style={styles.fabContainer}>
+            <LockPDFModal
+              visible={showLockModal}
+              fileName={pdfItem?.name}
+              onCancel={() => {
+                if (!isLocking) setShowLockModal(false);
+              }}
+              onConfirm={handleLockPdf}
+              isLoading={isLocking}
+            />
 
-          {isMenuOpen && !isEditMode && (
-            <View style={styles.menuItems}>
-              <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
-                onPress={() => { setIsMenuOpen(false); handlePrint(); }}
-                disabled={isZipping || isLocking || isOptimizing}
-              >
-                <MaterialCommunityIcons name="printer" size={24} color="#fff" />
-              </TouchableOpacity>
+            {isMenuOpen && (
+              <View style={styles.menuItems}>
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => { setIsMenuOpen(false); handlePrint(); }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  <MaterialCommunityIcons name="printer" size={24} color="#fff" />
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
-                onPress={() => { setIsMenuOpen(false); handleZip(); }}
-                disabled={isZipping || isLocking || isOptimizing}
-              >
-                {isZipping ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <MaterialCommunityIcons name="zip-box" size={24} color="#fff" />
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => { setIsMenuOpen(false); handleZip(); }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  {isZipping ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <MaterialCommunityIcons name="zip-box" size={24} color="#fff" />
+                  )}
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
-                onPress={() => {
-                  setIsMenuOpen(false);
-                  setShowLockModal(true);
-                }}
-                disabled={isZipping || isLocking || isOptimizing}
-              >
-                {isLocking ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <MaterialCommunityIcons name="lock" size={24} color="#fff" />
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => {
+                    setIsMenuOpen(false);
+                    setShowLockModal(true);
+                  }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  {isLocking ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <MaterialCommunityIcons name="lock" size={24} color="#fff" />
+                  )}
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
-                onPress={() => {
-                  setIsMenuOpen(false);
-                  openOptimizeModal();
-                }}
-                disabled={isZipping || isLocking || isOptimizing}
-              >
-                {isOptimizing ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <MaterialCommunityIcons name="tune-variant" size={24} color="#fff" />
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => {
+                    setIsMenuOpen(false);
+                    openOptimizeModal();
+                  }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  {isOptimizing ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <MaterialCommunityIcons name="tune-variant" size={24} color="#fff" />
+                  )}
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
-                onPress={() => { setIsMenuOpen(false); onEnterEditMode?.(pageCount); }}
-                disabled={isZipping || isLocking || isOptimizing}
-              >
-                <MaterialCommunityIcons name="file-document-edit-outline" size={24} color="#fff" />
-              </TouchableOpacity>
-            </View>
-          )}
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => {
+                    setIsMenuOpen(false);
+                    // Enter annotation mode with pen active
+                    setIsEditMode(true);
+                    setIsPanMode(false);
+                    setIsEraserMode(false);
+                    setIsTextMode(false);
+                    setIsHighlightMode(false);
+                  }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  <MaterialCommunityIcons name="pencil" size={24} color="#fff" />
+                </TouchableOpacity>
 
-          {!isEditMode && (
+                <TouchableOpacity
+                  style={[styles.menuItemBtn, (isZipping || isLocking || isOptimizing) && styles.tbButtonDisabled]}
+                  onPress={() => { setIsMenuOpen(false); onEnterEditMode?.(pageCount); }}
+                  disabled={isZipping || isLocking || isOptimizing}
+                >
+                  <MaterialCommunityIcons name="file-document-edit-outline" size={24} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            )}
+
             <TouchableOpacity
               style={styles.fabBtn}
               onPress={() => setIsMenuOpen(!isMenuOpen)}
             >
               <MaterialCommunityIcons name={isMenuOpen ? 'close' : 'dots-vertical'} size={28} color="#fff" />
             </TouchableOpacity>
-          )}
-        </View>
+          </View>
+        )}
 
         {(isZipping || isLocking || isOptimizing) && (
           <View style={styles.loadingOverlay}>
@@ -1329,6 +1589,7 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
+    bottom: 0,
   },
   menuItems: {
     marginBottom: 16,
@@ -1395,5 +1656,96 @@ const styles = StyleSheet.create({
   },
   tbButtonTextDisabled: {
     color: '#888',
+  },
+  // ── Annotation Toolbar ────────────────────────────────────
+  annotationToolbar: {
+    backgroundColor: 'rgba(14, 14, 22, 0.97)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 8,
+    paddingTop: 6,
+    paddingBottom: 8,
+    elevation: 20,
+    zIndex: 50,
+  },
+  atbRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 4,
+    paddingVertical: 4,
+  },
+  atbBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  atbBtnActive: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  atbBtnDisabled: {
+    opacity: 0.35,
+  },
+  atbDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    marginHorizontal: 4,
+  },
+  atbPageLabel: {
+    color: '#ccc',
+    fontSize: 12,
+    fontWeight: '600',
+    minWidth: 36,
+    textAlign: 'center',
+  },
+  atbSaveBtn: {
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  atbExportBtn: {
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: '#FF9F0A',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  atbCloseBtn: {
+    height: 38,
+    width: 38,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,59,48,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  colorSwatch: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    margin: 2,
+  },
+  strokeDot: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  strokeDotActive: {
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.4)',
   },
 });
